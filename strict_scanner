@@ -1,0 +1,166 @@
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import os
+import sys
+import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# --- الإعدادات الفنية ---
+LOOKBACK = 7           
+SENSITIVITY = 0.02     
+MIN_DAYS_GAP = 20      
+REJECTION_POWER = 0.16 
+TARGET_PROFIT = 0.05   
+STOP_LOSS = 0.04       
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+egyptian_stocks = [
+    "FWRY.CA", "GBCO.CA", "PHDC.CA", "ORHD.CA", "ZMID.CA", "CSAG.CA", "ETEL.CA", "ENGC.CA",
+    "COSG.CA", "POUL.CA", "ISMA.CA", "RAYA.CA", "MTIE.CA", "SKPC.CA", "ADRI.CA", "OIH.CA",
+    "NEDA.CA", "SVCE.CA", "EGAS.CA", "MCQE.CA", "SDTI.CA", "SPIN.CA", "NCCW.CA", "EPCO.CA",
+    "RUBX.CA", "HBCO.CA", "MFSC.CA", "DSCV.CA", "ISMQ.CA", "ARVA.CA", "AIFI.CA", "ELKA.CA",
+    "EEII.CA", "RREI.CA", "ACAMD.CA", "ELEC.CA", "MPCO.CA", "ETRS.CA", "DGTZ.CA", "PRDC.CA",
+    "AMER.CA", "MASF.CA", "ELSH.CA", "RACC.CA", "OBRI.CA", "MEPA.CA", "AMIA.CA", "ODIN.CA",
+    "MENA.CA", "GDWA.CA", "ATLC.CA", "ACTF.CA", "TAQA.CA", "EDFM.CA", "MILS.CA", "CEFM.CA",
+    "WCDF.CA", "GSSC.CA", "UEFA.CA", "AFMC.CA", "ANFI.CA", "TORA.CA", "AMES.CA", "SUCE.CA",
+    "ELNA.CA", "VALL.CA", "BONY.CA", "EGBE.CA", "ABUK.CA", "MFPC.CA", "AMOC.CA", "MICH.CA",
+    "ICFC.CA", "EGCH.CA", "JUFO.CA", "DOMI.CA", "AJWA.CA", "INFI.CA", "ADPC.CA", "OLFI.CA",
+    "SNFC.CA", "EFID.CA", "TMGH.CA", "SWDY.CA", "SUGR.CA", "PRCL.CA", "ORWE.CA", "ORAS.CA",
+    "OCDI.CA", "MPRC.CA", "LCSW.CA", "IFAP.CA", "HRHO.CA", "EGAL.CA", "EFIH.CA", "EFIC.CA",
+    "ECAP.CA", "EAST.CA", "COMI.CA", "CCAP.CA", "BTFH.CA", "BINV.CA", "ASCM.CA", "ARCC.CA",
+    "ALUM.CA", "ALCN.CA", "AFDI.CA", "ADIB.CA", "SAUD.CA", "BIOC.CA", "OCPH.CA", "MBSC.CA",
+    "APSW.CA", "MBEC.CA", "NINH.CA", "GOCC.CA", "CNFN.CA", "MIPH.CA", "MCRC.CA", "BIDI.CA",
+    "FIRE.CA", "NIPH.CA", "IDRE.CA", "MHOI.CA", "NHPS.CA", "GMCI.CA", "FNAR.CA", "CPCI.CA",
+    "ICMI.CA", "UBEE.CA", "CCRS.CA", "FAIT.CA", "UPMS.CA", "EALR.CA", "AALR.CA", "WKOL.CA",
+    "LUTS.CA", "ELWA.CA", "RTVC.CA", "EXPA.CA", "CIEB.CA", "QNBE.CA", "BIGP.CA", "EASB.CA",
+    "ROTO.CA", "DTPP.CA", "GIHD.CA", "EBSE.CA", "IBCT.CA", "CANA.CA", "EBSC.CA", "ADCI.CA",
+    "PHTV.CA", "SEIG.CA", "MOSC.CA", "GTW.CA", "PHGC.CA", "PRMH.CA", "RKAZ.CA", "CAED.CA",
+    "RMDA.CA", "SCTS.CA", "EGTS.CA", "ATQA.CA", "ICID.CA", "UNIP.CA", "CICH.CA",
+    "RAKT.CA", "HDBK.CA", "KWIN.CA", "SMFR.CA", "NARE.CA", "GRCA.CA", "EPPK.CA", "EHDR.CA",
+    "VERT.CA", "UNIT.CA", "MAAL.CA", "CLHO.CA", "FTNS.CA", "TALM.CA", "SIPC.CA", "MPCI.CA",
+    "PHAR.CA", "HELI.CA", "KABO.CA", "IRON.CA", "EGS3.CA", "SCFM.CA", "MOIN.CA", "GGCC.CA",
+    "ARAB.CA", "COPR.CA", "CERA.CA", "OFH.CA", "AIH.CA", "AREH.CA", "UEGC.CA", "MOED.CA",
+    "SPMD.CA", "KZPC.CA", "ISPH.CA", "ACGC.CA", "IEEC.CA", "ZEOT.CA", "SCEM.CA", "ACRO.CA",
+    "DAPH.CA", "ACAP.CA", "TANM.CA", "EMFD.CA", "AMPI.CA", "KRDI.CA", "ASPI.CA", "EIUD.CA",
+    "CRST.CA", "CIRA.CA", "GGRN.CA", "VLMR.CA", "AIDC.CA"
+]
+
+class SuppressStdOut:
+    def __enter__(self):
+        self._original_stderr = sys.stderr
+        self.devnull = open(os.devnull, 'w')
+        sys.stderr = self.devnull
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.devnull.close()
+        sys.stderr = self._original_stderr
+
+def find_steel_supports(df_slice):
+    lows = df_slice['low'].values
+    highs = df_slice['high'].values
+    pivots = []
+    for i in range(LOOKBACK, len(lows) - LOOKBACK):
+        if lows[i] == min(lows[i-LOOKBACK : i+LOOKBACK+1]):
+            pivots.append({'index': i, 'price': lows[i]})
+    steel_levels = []
+    for i in range(len(pivots)):
+        for j in range(i):
+            p1, p2 = pivots[j], pivots[i]
+            price_diff = abs(p1['price'] - p2['price']) / p1['price']
+            time_diff = p2['index'] - p1['index']
+            if price_diff <= SENSITIVITY and time_diff >= MIN_DAYS_GAP:
+                inter_high = max(highs[p1['index'] : p2['index']])
+                rejection = (inter_high - p1['price']) / p1['price']
+                if rejection >= REJECTION_POWER:
+                    steel_levels.append(p2['price'])
+                    break
+    return list(set(steel_levels))
+
+def process_stock(ticker):
+    trades = []
+    try:
+        with SuppressStdOut():
+            df = yf.download(ticker, period="2y", interval="1d", progress=False, auto_adjust=True)
+        if df.empty or len(df) < 50: return trades
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+        df.columns = [c.lower() for c in df.columns]
+        lows, highs, closes, opens = df['low'].values, df['high'].values, df['close'].values, df['open'].values
+        dates = df.index
+        in_pos = False
+        entry_p, entry_d = 0, None
+        cooldown_until_idx = -1 
+
+        for i in range(20, len(df)):
+            if not in_pos:
+                if i < cooldown_until_idx: continue
+                supports = find_steel_supports(df.iloc[:i])
+                for lvl in supports:
+                    upper_bound = lvl * 1.015
+                    lower_bound = lvl * 0.985
+                    was_above = lows[i-1] > upper_bound
+                    opened_above = opens[i] >= lower_bound
+                    if was_above and opened_above:
+                        if lows[i] <= upper_bound and lows[i] >= lower_bound:
+                            entry_p = lvl 
+                            entry_d = dates[i]
+                            in_pos = True
+                            break 
+            else:
+                target = entry_p * (1 + TARGET_PROFIT)
+                stop = entry_p * (1 - STOP_LOSS)
+                if highs[i] >= target:
+                    in_pos, cooldown_until_idx = False, i + 14
+                elif lows[i] <= stop:
+                    in_pos, cooldown_until_idx = False, i + 1
+                elif i == len(df) - 1:
+                    current_return = ((closes[i] - entry_p) / entry_p) * 100
+                    trades.append({
+                        'Ticker': ticker, 'Status': 'Open ⏳', 
+                        'Entry Price': round(entry_p, 3), 'Current Price': round(closes[i], 3),
+                        'Return': f"{current_return:.2f}%", 'Entry Date': entry_d, 
+                        'Exit Date': dates[i]
+                    })
+    except Exception: pass
+    return trades
+
+def send_telegram_message(message):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    try: requests.post(url, json=payload)
+    except Exception: pass
+
+def run_comprehensive_backtest():
+    all_results = []
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(process_stock, ticker): ticker for ticker in egyptian_stocks}
+        for future in as_completed(futures):
+            res = future.result()
+            if res: all_results.extend(res)
+    if all_results:
+        df_res = pd.DataFrame(all_results)
+        df_res['Exit Date'] = pd.to_datetime(df_res['Exit Date']).dt.date
+        today_date = df_res['Exit Date'].max()
+        today_trades = df_res[df_res['Exit Date'] == today_date]
+        
+        if not today_trades.empty:
+            msg = f"🔔 *تقرير الصفقات الجديدة لليوم ({today_date})* 🔔\n\n"
+            for _, row in today_trades.iterrows():
+                msg += f"📈 *السهم:* `{row['Ticker']}`\n"
+                msg += f"📥 *سعر الدخول المقترح:* {row['Entry Price']}\n"
+                msg += f"💲 *السعر الحالي:* {row['Current Price']}\n"
+                msg += f"📊 *العائد العائم:* {row['Return']}\n"
+                msg += f"🎯 *الهدف (+5%):* {round(row['Entry Price']*1.05, 2)}\n"
+                msg += f"🛑 *وقف الخسارة (-4%):* {round(row['Entry Price']*0.96, 2)}\n"
+                msg += "═ ═ ═ ═ ═ ═ ═ ═ ═\n"
+            send_telegram_message(msg)
+        else:
+            send_telegram_message(f"📋 *تقرير السوق ({today_date}):*\nلا توجد صفقات جديدة لامست الدعم الفولاذي اليوم.")
+    else:
+        send_telegram_message("⚠️ لم يتم العثور على أي صفقات مفتوحة في السوق حالياً.")
+
+if __name__ == "__main__":
+    run_comprehensive_backtest()
