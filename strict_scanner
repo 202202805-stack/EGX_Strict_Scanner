@@ -5,21 +5,18 @@ from datetime import datetime, timedelta
 import os
 import sys
 import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+# --- إعدادات التلجرام (يتم قراءتها من GitHub Secrets) ---
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # --- الإعدادات الفنية ---
 LOOKBACK = 7          
 SENSITIVITY = 0.02     
 MIN_DAYS_GAP = 20      
 REJECTION_POWER = 0.16 
-TARGET_PROFIT = 0.05   
-STOP_LOSS = 0.04       
-
-# 🚨 الفلتر: أقصى نسبة مئوية مسموح بها لإغلاق يوم اللمس بعيداً عن الدعم (1.5%)
-MAX_ENTRY_SLIPPAGE = 0.015 
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+MAX_ENTRY_SLIPPAGE = 0.015  # أقصى نسبة مئوية مسموح بها لإغلاق يوم اللمس بعيداً عن الدعم (1.5%)
 
 # قائمة الأسهم المصرية
 egyptian_stocks = [
@@ -63,11 +60,25 @@ class SuppressStdOut:
         sys.stderr = self._original_stderr
 
 def send_telegram_message(message):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    try: requests.post(url, json=payload)
-    except Exception: pass
+    """ إرسال الإشعارات إلى التلجرام """
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ لم يتم ضبط TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID في متغيرات البيئة.")
+        return
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code == 200:
+            print("✅ تم إرسال التقرير إلى Telegram بنجاح.")
+        else:
+            print(f"❌ فشل إرسال التلجرام: {response.text}")
+    except Exception as e:
+        print(f"⚠️ خطأ أثناء الاتصال بـ Telegram: {e}")
 
 def find_steel_supports_optimized(df):
     lows = df['low'].values
@@ -95,8 +106,8 @@ def find_steel_supports_optimized(df):
             if price_diff <= SENSITIVITY and time_diff >= MIN_DAYS_GAP:
                 inter_opens = opens[p1['index'] + 1 : p2['index']]
                 inter_closes = closes[p1['index'] + 1 : p2['index']]
-                
                 inter_bodies_low = np.minimum(inter_opens, inter_closes)
+                
                 support_level = p1['price']
                 
                 if len(inter_bodies_low) > 0 and np.any(inter_bodies_low < support_level):
@@ -114,15 +125,16 @@ def find_steel_supports_optimized(df):
                     break
     return steel_levels
 
-def process_stock(ticker, start_dt, end_dt):
-    trades = []
+def scan_single_stock(ticker):
+    """ فحص السهم للبحث عن إشارة دخول جديدة في آخر يوم تداول فقط """
     try:
         with SuppressStdOut():
             ticker_obj = yf.Ticker(ticker)
             splits = ticker_obj.splits
-            df = yf.download(ticker, start=start_dt, end=end_dt, interval="1d", progress=False, auto_adjust=True)
+            # كافي سحب آخر سنة لمعرفة الدعوم وتوليد الإشارات الحالية
+            df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)
             
-        if df.empty or len(df) < 50: return trades
+        if df.empty or len(df) < 50: return None
         
         if isinstance(df.columns, pd.MultiIndex): 
             df.columns = df.columns.get_level_values(0)
@@ -138,101 +150,77 @@ def process_stock(ticker, start_dt, end_dt):
                 segment += 1
                 df.loc[df.index >= d, "segment"] = segment
         
-        lows, highs, closes, opens = df['low'].values, df['high'].values, df['close'].values, df['open'].values
+        lows, closes, opens = df['low'].values, df['close'].values, df['open'].values
         dates = df.index
         
         all_steel_levels = find_steel_supports_optimized(df)
         
-        in_pos = False
-        entry_p, entry_d, entry_day_close = 0, None, 0
-        cooldown_until_idx = -1 
+        # نتحقق فقط من الشمعة الأخيرة (اليوم الحقيقي للـ Scanner)
+        last_idx = len(df) - 1
+        
+        available_supports = [
+            l for l in all_steel_levels 
+            if l['active_from_idx'] <= last_idx and l['segment'] == df['segment'].iloc[last_idx]
+        ]
 
-        for i in range(20, len(df)):
-            if not in_pos:
-                if i < cooldown_until_idx: continue
-
-                available_supports = [
-                    l for l in all_steel_levels 
-                    if l['active_from_idx'] <= i and l['segment'] == df['segment'].iloc[i]
-                ]
-
-                for support in available_supports:
-                    lvl = support['price']
-                    upper_bound = lvl * 1.01
-                    lower_bound = lvl * 0.99
-                    
-                    yesterday_body_low = min(opens[i-1], closes[i-1])
-                    was_above = yesterday_body_low > upper_bound
-                    opened_above = opens[i] >= lower_bound
-                    
-                    if was_above and opened_above:
-                        if lows[i] <= upper_bound and lows[i] >= lower_bound:
-                            if (closes[i] - lvl) / lvl > MAX_ENTRY_SLIPPAGE:
-                                continue 
-                            
-                            entry_p = lvl 
-                            entry_d = dates[i]
-                            entry_day_close = closes[i]
-                            in_pos = True
-                            break 
+        for support in available_supports:
+            lvl = support['price']
+            upper_bound = lvl * 1.01
+            lower_bound = lvl * 0.99
             
-            else:
-                target = entry_day_close * (1 + TARGET_PROFIT)
-                stop = entry_p * (1 - STOP_LOSS)
-                
-                if highs[i] >= target:
-                    in_pos, cooldown_until_idx = False, i + 14
-                elif lows[i] <= stop:
-                    in_pos, cooldown_until_idx = False, i + 1
-                elif i == len(df) - 1:
-                    current_return = ((closes[i] - entry_day_close) / entry_day_close) * 100
-                    trades.append({
-                        'Ticker': ticker, 'Status': 'Open ⏳', 
-                        'Entry Price': round(entry_p, 3), 
-                        'Current Price': round(closes[i], 3),
-                        'Return': f"{current_return:.2f}%", 
-                        'Entry Date': entry_d, 
-                        'Exit Date': dates[i]
-                    })
+            yesterday_body_low = min(opens[last_idx-1], closes[last_idx-1])
+            was_above = yesterday_body_low > upper_bound
+            opened_above = opens[last_idx] >= lower_bound
+            
+            if was_above and opened_above:
+                if lows[last_idx] <= upper_bound and lows[last_idx] >= lower_bound:
+                    
+                    # الفلتر الصارم لإغلاق يوم اللمس
+                    if (closes[last_idx] - lvl) / lvl > MAX_ENTRY_SLIPPAGE:
+                        continue 
+                    
+                    dist_percent = ((closes[last_idx] - lvl) / lvl) * 100
+                    
+                    return {
+                        'Ticker': ticker.replace('.CA', ''),
+                        'Support_Price': round(lvl, 3),
+                        'Close_Price': round(closes[last_idx], 3),
+                        'Distance_%': round(dist_percent, 2),
+                        'Date': dates[last_idx]
+                    }
 
     except Exception: pass
-    return trades
+    return None
 
-def run_comprehensive_backtest():
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=2 * 365) # فحص سنتين لتسريع العمل على الهوست
+def run_daily_scanner():
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 بدء الفحص اليومي للأسهم المصرية...")
     
-    start_str = start_date.strftime('%Y-%m-%d')
-    end_str = end_date.strftime('%Y-%m-%d')
-
-    all_results = []
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {executor.submit(process_stock, ticker, start_str, end_str): ticker for ticker in egyptian_stocks}
+    signals = []
+    with ProcessPoolExecutor() as executor:
+        futures = {executor.submit(scan_single_stock, ticker): ticker for ticker in egyptian_stocks}
         for future in as_completed(futures):
             res = future.result()
-            if res: all_results.extend(res)
+            if res:
+                signals.append(res)
 
-    if all_results:
-        df_res = pd.DataFrame(all_results)
-        df_res['Exit Date'] = pd.to_datetime(df_res['Exit Date']).dt.date
-        today_date = df_res['Exit Date'].max()
-        today_trades = df_res[df_res['Exit Date'] == today_date]
-        
-        if not today_trades.empty:
-            msg = f"🔔 *تقرير الصفقات الجديدة المفلترة لليوم ({today_date})* 🔔\n\n"
-            for _, row in today_trades.iterrows():
-                msg += f"📈 *السهم:* `{row['Ticker']}`\n"
-                msg += f"📥 *سعر الدعم المستهدف:* {row['Entry Price']}\n"
-                msg += f"💲 *السعر الحالي (الإغلاق):* {row['Current Price']}\n"
-                msg += f"📊 *العائد العائم:* {row['Return']}\n"
-                msg += f"🎯 *الهدف (+5% من الإغلاق):* {round(row['Current Price']*1.05, 2)}\n"
-                msg += f"🛑 *وقف الخسارة (-4% من الدعم):* {round(row['Entry Price']*0.96, 2)}\n"
-                msg += "═ ═ ═ ═ ═ ═ ═ ═ ═\n"
-            send_telegram_message(msg)
-        else:
-            send_telegram_message(f"📋 *تقرير السوق ({today_date}):*\nلا توجد صفقات جديدة لامست الدعم الفولاذي المفلتر اليوم.")
+    # بناء رسالة التلجرام
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    message = f"📊 *تقرير سكانر الأسهم المصرية (EGX)*\n📅 *التاريخ:* `{today_str}`\n"
+    message += "─" * 28 + "\n\n"
+
+    if signals:
+        message += f"🎯 *تم العثور على ({len(signals)}) فرصة شراء عند الدعم:*\n\n"
+        for sig in signals:
+            message += f"🔹 *السهم:* `{sig['Ticker']}`\n"
+            message += f"   • سعر الدعم: `{sig['Support_Price']}` جم\n"
+            message += f"   • سعر الإغلاق: `{sig['Close_Price']}` جم\n"
+            message += f"   • الابتعاد عن الدعم: `{sig['Distance_%']}%`\n"
+            message += "🏼" + "─"*15 + "\n"
     else:
-        send_telegram_message("⚠️ لم يتم العثور على أي صفقات مفتوحة مطابق للشروط الصارمة حالياً.")
+        message += "⚠️ *لا توجد أسهم ملامسة لمستويات الدعم المطابقة للشروط اليوم.*"
+
+    print(message)
+    send_telegram_message(message)
 
 if __name__ == "__main__":
-    run_comprehensive_backtest()
+    run_daily_scanner()
