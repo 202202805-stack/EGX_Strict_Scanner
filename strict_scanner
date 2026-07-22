@@ -7,8 +7,7 @@ import sys
 import requests
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-# --- إعدادات التلجرام (يتم قراءتها من GitHub Secrets) ---
-# --- إعدادات التلجرام (تطابق مع أسماء GitHub Secrets عندك) ---
+# --- إعدادات التلجرام (مطابقة لأسماء Secrets عندك) ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -17,6 +16,8 @@ LOOKBACK = 7
 SENSITIVITY = 0.02     
 MIN_DAYS_GAP = 20      
 REJECTION_POWER = 0.16 
+TARGET_PROFIT = 0.05   
+STOP_LOSS = 0.04       
 MAX_ENTRY_SLIPPAGE = 0.015  # أقصى نسبة مئوية مسموح بها لإغلاق يوم اللمس بعيداً عن الدعم (1.5%)
 
 # قائمة الأسهم المصرية
@@ -63,7 +64,7 @@ class SuppressStdOut:
 def send_telegram_message(message):
     """ إرسال الإشعارات إلى التلجرام """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ لم يتم ضبط TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID في متغيرات البيئة.")
+        print("⚠️ لم يتم ضبط TELEGRAM_TOKEN أو TELEGRAM_CHAT_ID.")
         return
     
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -126,16 +127,15 @@ def find_steel_supports_optimized(df):
                     break
     return steel_levels
 
-def scan_single_stock(ticker):
-    """ فحص السهم للبحث عن إشارة دخول جديدة في آخر يوم تداول فقط """
+def process_stock(ticker, start_dt, end_dt):
+    trades = []
     try:
         with SuppressStdOut():
             ticker_obj = yf.Ticker(ticker)
             splits = ticker_obj.splits
-            # كافي سحب آخر سنة لمعرفة الدعوم وتوليد الإشارات الحالية
-            df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)
+            df = yf.download(ticker, start=start_dt, end=end_dt, interval="1d", progress=False, auto_adjust=True)
             
-        if df.empty or len(df) < 50: return None
+        if df.empty or len(df) < 50: return trades
         
         if isinstance(df.columns, pd.MultiIndex): 
             df.columns = df.columns.get_level_values(0)
@@ -151,74 +151,105 @@ def scan_single_stock(ticker):
                 segment += 1
                 df.loc[df.index >= d, "segment"] = segment
         
-        lows, closes, opens = df['low'].values, df['close'].values, df['open'].values
+        lows, highs, closes, opens = df['low'].values, df['high'].values, df['close'].values, df['open'].values
         dates = df.index
         
         all_steel_levels = find_steel_supports_optimized(df)
         
-        # نتحقق فقط من الشمعة الأخيرة (اليوم الحقيقي للـ Scanner)
-        last_idx = len(df) - 1
-        
-        available_supports = [
-            l for l in all_steel_levels 
-            if l['active_from_idx'] <= last_idx and l['segment'] == df['segment'].iloc[last_idx]
-        ]
+        in_pos = False
+        entry_p, entry_d, entry_day_close = 0, None, 0
+        cooldown_until_idx = -1 
 
-        for support in available_supports:
-            lvl = support['price']
-            upper_bound = lvl * 1.01
-            lower_bound = lvl * 0.99
+        for i in range(20, len(df)):
+            if not in_pos:
+                if i < cooldown_until_idx: continue
+
+                available_supports = [
+                    l for l in all_steel_levels 
+                    if l['active_from_idx'] <= i and l['segment'] == df['segment'].iloc[i]
+                ]
+
+                for support in available_supports:
+                    lvl = support['price']
+                    upper_bound = lvl * 1.01
+                    lower_bound = lvl * 0.99
+                    
+                    yesterday_body_low = min(opens[i-1], closes[i-1])
+                    was_above = yesterday_body_low > upper_bound
+                    opened_above = opens[i] >= lower_bound
+                    
+                    if was_above and opened_above:
+                        if lows[i] <= upper_bound and lows[i] >= lower_bound:
+                            
+                            if (closes[i] - lvl) / lvl > MAX_ENTRY_SLIPPAGE:
+                                continue 
+                            
+                            entry_p = lvl 
+                            entry_d = dates[i]
+                            entry_day_close = closes[i]
+                            in_pos = True
+                            break 
             
-            yesterday_body_low = min(opens[last_idx-1], closes[last_idx-1])
-            was_above = yesterday_body_low > upper_bound
-            opened_above = opens[last_idx] >= lower_bound
-            
-            if was_above and opened_above:
-                if lows[last_idx] <= upper_bound and lows[last_idx] >= lower_bound:
-                    
-                    # الفلتر الصارم لإغلاق يوم اللمس
-                    if (closes[last_idx] - lvl) / lvl > MAX_ENTRY_SLIPPAGE:
-                        continue 
-                    
-                    dist_percent = ((closes[last_idx] - lvl) / lvl) * 100
-                    
-                    return {
-                        'Ticker': ticker.replace('.CA', ''),
-                        'Support_Price': round(lvl, 3),
-                        'Close_Price': round(closes[last_idx], 3),
-                        'Distance_%': round(dist_percent, 2),
-                        'Date': dates[last_idx]
-                    }
+            else:
+                target = entry_day_close * (1 + TARGET_PROFIT)
+                stop = entry_p * (1 - STOP_LOSS)
+                
+                if highs[i] >= target:
+                    in_pos, cooldown_until_idx = False, i + 14
+                
+                elif lows[i] <= stop:
+                    in_pos, cooldown_until_idx = False, i + 1
+                
+                elif i == len(df) - 1:
+                    current_return = ((closes[i] - entry_day_close) / entry_day_close) * 100
+                    trades.append({
+                        'Ticker': ticker.replace('.CA', ''), 
+                        'Status': 'Open ⏳', 
+                        'Entry Price': round(entry_p, 3), 
+                        'Entry Day Close': round(entry_day_close, 3), 
+                        'Current Price': round(closes[i], 3),
+                        'Return': f"{current_return:.2f}%", 
+                        'Entry Date': entry_d, 
+                        'Days Held': (dates[i] - entry_d).days
+                    })
 
     except Exception: pass
-    return None
+    return trades
 
 def run_daily_scanner():
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 بدء الفحص اليومي للأسهم المصرية...")
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=2 * 365)  # فحص سنتين كافية جداً لاستخراج الصفقات المفتوحة
     
-    signals = []
+    start_str = start_date.strftime('%Y-%m-%d')
+    end_str = end_date.strftime('%Y-%m-%d')
+
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 تشغيل المنظومة واستخراج الصفقات النشطة المفتوحة...")
+    
+    open_signals = []
     with ProcessPoolExecutor() as executor:
-        futures = {executor.submit(scan_single_stock, ticker): ticker for ticker in egyptian_stocks}
+        futures = {executor.submit(process_stock, ticker, start_str, end_str): ticker for ticker in egyptian_stocks}
         for future in as_completed(futures):
             res = future.result()
-            if res:
-                signals.append(res)
+            if res: open_signals.extend(res)
 
-    # بناء رسالة التلجرام
+    # بناء الرسالة الموجهة للتلجرام
     today_str = datetime.now().strftime('%Y-%m-%d')
-    message = f"📊 *تقرير سكانر الأسهم المصرية (EGX)*\n📅 *التاريخ:* `{today_str}`\n"
-    message += "─" * 28 + "\n\n"
+    message = f"📊 *تقرير الأسهم المصرية - الصفقات المفتوحة حالياً*\n📅 *التاريخ:* `{today_str}`\n"
+    message += "─" * 30 + "\n\n"
 
-    if signals:
-        message += f"🎯 *تم العثور على ({len(signals)}) فرصة شراء عند الدعم:*\n\n"
-        for sig in signals:
+    if open_signals:
+        message += f"⏳ *تم العثور على ({len(open_signals)}) صفقة مفتوحة ومستمرة:*\n\n"
+        for sig in open_signals:
+            dist = ((sig['Current Price'] - sig['Entry Price']) / sig['Entry Price']) * 100
             message += f"🔹 *السهم:* `{sig['Ticker']}`\n"
-            message += f"   • سعر الدعم: `{sig['Support_Price']}` جم\n"
-            message += f"   • سعر الإغلاق: `{sig['Close_Price']}` جم\n"
-            message += f"   • الابتعاد عن الدعم: `{sig['Distance_%']}%`\n"
-            message += "🏼" + "─"*15 + "\n"
+            message += f"   • تاريخ الدخول: `{sig['Entry Date']}`\n"
+            message += f"   • سعر الدعم: `{sig['Entry Price']}` جم\n"
+            message += f"   • سعر الإغلاق الحالي: `{sig['Current Price']}` جم\n"
+            message += f"   • المسافة عن الدعم: `{dist:.2f}%`\n"
+            message += f"   • العائد الحالي: `{sig['Return']}`\n"
+            message += "─"*18 + "\n"
     else:
-        message += "⚠️ *لا توجد أسهم ملامسة لمستويات الدعم المطابقة للشروط اليوم.*"
+        message += "⚠️ *لا توجد صفقات مفتوحة حالياً مطابقة لشروط الكود.*"
 
     print(message)
     send_telegram_message(message)
