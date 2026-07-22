@@ -8,7 +8,8 @@ import requests
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # --- إعدادات التلجرام (يتم قراءتها من GitHub Secrets) ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# --- إعدادات التلجرام (تطابق مع أسماء GitHub Secrets عندك) ---
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # --- الإعدادات الفنية ---
