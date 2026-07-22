@@ -7,7 +7,7 @@ import sys
 import requests
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-# --- إعدادات التلجرام (تأخذ القيمة تلقائياً من GitHub Secrets) ---
+# --- إعدادات التلجرام ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -74,11 +74,11 @@ def send_telegram_notification(message):
     try:
         response = requests.post(url_msg, json=payload, timeout=15)
         if response.status_code == 200:
-            print("✅ تم إرسال الصفقات المفتوحة إلى التلجرام بنجاح.")
+            print("✅ تم إرسال الرسالة بالتنسيق الجديد بنجاح.")
         else:
             print(f"❌ فشل الإرسال: {response.text}")
     except Exception as e:
-        print(f"❌ خطأ إرسال نص التلجرام: {e}")
+        print(f"❌ خطأ إرسال التلجرام: {e}")
 
 def find_steel_supports_optimized(df):
     lows = df['low'].values
@@ -200,15 +200,16 @@ def process_stock(ticker, start_dt, end_dt):
                 
                 elif i == len(df) - 1:
                     current_return = ((closes[i] - entry_day_close) / entry_day_close) * 100
+                    target_price = entry_day_close * 1.05
+                    stop_price = entry_p * 0.96
+
                     trades.append({
-                        'Ticker': ticker.replace('.CA', ''), 
-                        'Status': 'Open ⏳', 
-                        'Entry Price': round(entry_p, 3), 
-                        'Entry Day Close': round(entry_day_close, 3), 
-                        'Current Price': round(closes[i], 3),
-                        'Return': f"{current_return:.2f}%", 
-                        'Entry Date': entry_d, 
-                        'Days Held': (dates[i] - entry_d).days
+                        'Ticker': ticker,
+                        'Entry_Price': round(entry_p, 2),
+                        'Current_Price': round(closes[i], 2),
+                        'Return': current_return,
+                        'Target_Price': round(target_price, 2),
+                        'Stop_Price': round(stop_price, 2)
                     })
 
     except Exception: pass
@@ -221,7 +222,7 @@ def run_comprehensive_backtest():
     start_str = start_date.strftime('%Y-%m-%d')
     end_str = end_date.strftime('%Y-%m-%d')
 
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 تشغيل الفحص واستخراج الصفقات المفتوحة...")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 تشغيل الفحص وتجهيز التقرير...")
     
     open_trades = []
     with ProcessPoolExecutor() as executor:
@@ -230,26 +231,22 @@ def run_comprehensive_backtest():
             res = future.result()
             if res: open_trades.extend(res)
 
-    today_str = datetime.now().strftime('%Y-%m-%d')
-    msg = f"📊 *تقرير الصفقات المفتوحة حالياً (EGX)*\n📅 *التاريخ:* `{today_str}`\n"
-    msg += "─" * 30 + "\n\n"
-
     if open_trades:
-        msg += f"⏳ *تم العثور على ({len(open_trades)}) صفقة مفتوحة ومستمرة:*\n\n"
+        msg = ""
         for row in open_trades:
-            dist = ((row['Current Price'] - row['Entry Price']) / row['Entry Price']) * 100
-            msg += f"🔹 *السهم:* `{row['Ticker']}`\n"
-            msg += f"   • تاريخ الدخول: `{row['Entry Date']}`\n"
-            msg += f"   • سعر الدعم: `{row['Entry Price']}` جم\n"
-            msg += f"   • سعر الإغلاق الحالي: `{row['Current Price']}` جم\n"
-            msg += f"   • المسافة عن الدعم: `{dist:.2f}%`\n"
-            msg += f"   • العائد الحلي: `{row['Return']}`\n"
-            msg += f"   • أيام الاحتفاظ: `{row['Days Held']}` يوم\n"
-            msg += "─" * 18 + "\n"
+            return_str = f"{row['Return']:.2f}%" if row['Return'] < 0 else f"{row['Return']:.2f}%+"
+            
+            msg += f"📈 **السهم**: `{row['Ticker']}`\n"
+            msg += f"📩 **سعر الدخول المقترح**: `{row['Entry_Price']}`\n"
+            msg += f"💲 **السعر الحالي**: `{row['Current_Price']}`\n"
+            msg += f"📊 **العائد العائم**: `{return_str}`\n"
+            msg += f"🎯 **الهدف (+5%)**: `{row['Target_Price']}`\n"
+            msg += f"🛑 **وقف الخسارة (-4%)**: `{row['Stop_Price']}`\n"
+            msg += "=============\n"
     else:
-        msg += "⚠️ *لا توجد صفقات مفتوحة حالياً مطابقة للشروط.*"
+        msg = "⚠️ **لا توجد صفقات مفتوحة حالياً مطابقة للشروط.**"
 
-    # إرسال الرسالة فقط
+    # إرسال الرسالة إلى التلجرام
     send_telegram_notification(msg)
 
 if __name__ == "__main__":
