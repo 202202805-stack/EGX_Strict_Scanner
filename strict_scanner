@@ -7,7 +7,7 @@ import sys
 import requests
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-# --- إعدادات التلجرام (مطابقة لأسماء Secrets عندك) ---
+# --- إعدادات التلجرام (تأخذ القيمة تلقائياً من GitHub Secrets) ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -18,7 +18,9 @@ MIN_DAYS_GAP = 20
 REJECTION_POWER = 0.16 
 TARGET_PROFIT = 0.05   
 STOP_LOSS = 0.04       
-MAX_ENTRY_SLIPPAGE = 0.015  # أقصى نسبة مئوية مسموح بها لإغلاق يوم اللمس بعيداً عن الدعم (1.5%)
+
+# 🚨 الفلتر: أقصى نسبة مئوية مسموح بها لإغلاق يوم اللمس بعيداً عن الدعم (1.5%)
+MAX_ENTRY_SLIPPAGE = 0.015 
 
 # قائمة الأسهم المصرية
 egyptian_stocks = [
@@ -61,26 +63,22 @@ class SuppressStdOut:
         self.devnull.close()
         sys.stderr = self._original_stderr
 
-def send_telegram_message(message):
-    """ إرسال الإشعارات إلى التلجرام """
+def send_telegram_notification(message):
+    """ إرسال نص الرسالة فقط إلى التلجرام """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ لم يتم ضبط TELEGRAM_TOKEN أو TELEGRAM_CHAT_ID.")
+        print("⚠️ لم يتم العثور على بيانات TELEGRAM_TOKEN أو TELEGRAM_CHAT_ID.")
         return
-    
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown"
-    }
+
+    url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
-        response = requests.post(url, json=payload, timeout=10)
+        response = requests.post(url_msg, json=payload, timeout=15)
         if response.status_code == 200:
-            print("✅ تم إرسال التقرير إلى Telegram بنجاح.")
+            print("✅ تم إرسال الصفقات المفتوحة إلى التلجرام بنجاح.")
         else:
-            print(f"❌ فشل إرسال التلجرام: {response.text}")
+            print(f"❌ فشل الإرسال: {response.text}")
     except Exception as e:
-        print(f"⚠️ خطأ أثناء الاتصال بـ Telegram: {e}")
+        print(f"❌ خطأ إرسال نص التلجرام: {e}")
 
 def find_steel_supports_optimized(df):
     lows = df['low'].values
@@ -216,43 +214,43 @@ def process_stock(ticker, start_dt, end_dt):
     except Exception: pass
     return trades
 
-def run_daily_scanner():
+def run_comprehensive_backtest():
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=2 * 365)  # فحص سنتين كافية جداً لاستخراج الصفقات المفتوحة
+    start_date = end_date - timedelta(days=10 * 365)
     
     start_str = start_date.strftime('%Y-%m-%d')
     end_str = end_date.strftime('%Y-%m-%d')
 
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 تشغيل المنظومة واستخراج الصفقات النشطة المفتوحة...")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 تشغيل الفحص واستخراج الصفقات المفتوحة...")
     
-    open_signals = []
+    open_trades = []
     with ProcessPoolExecutor() as executor:
         futures = {executor.submit(process_stock, ticker, start_str, end_str): ticker for ticker in egyptian_stocks}
         for future in as_completed(futures):
             res = future.result()
-            if res: open_signals.extend(res)
+            if res: open_trades.extend(res)
 
-    # بناء الرسالة الموجهة للتلجرام
     today_str = datetime.now().strftime('%Y-%m-%d')
-    message = f"📊 *تقرير الأسهم المصرية - الصفقات المفتوحة حالياً*\n📅 *التاريخ:* `{today_str}`\n"
-    message += "─" * 30 + "\n\n"
+    msg = f"📊 *تقرير الصفقات المفتوحة حالياً (EGX)*\n📅 *التاريخ:* `{today_str}`\n"
+    msg += "─" * 30 + "\n\n"
 
-    if open_signals:
-        message += f"⏳ *تم العثور على ({len(open_signals)}) صفقة مفتوحة ومستمرة:*\n\n"
-        for sig in open_signals:
-            dist = ((sig['Current Price'] - sig['Entry Price']) / sig['Entry Price']) * 100
-            message += f"🔹 *السهم:* `{sig['Ticker']}`\n"
-            message += f"   • تاريخ الدخول: `{sig['Entry Date']}`\n"
-            message += f"   • سعر الدعم: `{sig['Entry Price']}` جم\n"
-            message += f"   • سعر الإغلاق الحالي: `{sig['Current Price']}` جم\n"
-            message += f"   • المسافة عن الدعم: `{dist:.2f}%`\n"
-            message += f"   • العائد الحالي: `{sig['Return']}`\n"
-            message += "─"*18 + "\n"
+    if open_trades:
+        msg += f"⏳ *تم العثور على ({len(open_trades)}) صفقة مفتوحة ومستمرة:*\n\n"
+        for row in open_trades:
+            dist = ((row['Current Price'] - row['Entry Price']) / row['Entry Price']) * 100
+            msg += f"🔹 *السهم:* `{row['Ticker']}`\n"
+            msg += f"   • تاريخ الدخول: `{row['Entry Date']}`\n"
+            msg += f"   • سعر الدعم: `{row['Entry Price']}` جم\n"
+            msg += f"   • سعر الإغلاق الحالي: `{row['Current Price']}` جم\n"
+            msg += f"   • المسافة عن الدعم: `{dist:.2f}%`\n"
+            msg += f"   • العائد الحلي: `{row['Return']}`\n"
+            msg += f"   • أيام الاحتفاظ: `{row['Days Held']}` يوم\n"
+            msg += "─" * 18 + "\n"
     else:
-        message += "⚠️ *لا توجد صفقات مفتوحة حالياً مطابقة لشروط الكود.*"
+        msg += "⚠️ *لا توجد صفقات مفتوحة حالياً مطابقة للشروط.*"
 
-    print(message)
-    send_telegram_message(message)
+    # إرسال الرسالة فقط
+    send_telegram_notification(msg)
 
 if __name__ == "__main__":
-    run_daily_scanner()
+    run_comprehensive_backtest()
