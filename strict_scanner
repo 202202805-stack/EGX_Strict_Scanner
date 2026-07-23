@@ -259,7 +259,7 @@ class SuppressStdOut:
 
 
 def send_telegram_notification(message):
-  """إرسال نص الرسالة فقط إلى التلجرام"""
+  """إرسال نص الرسالة مع طباعة استجابة تلجرام بالتفصيل للتشخيص"""
   if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
     print(
         '⚠️ لم يتم العثور على بيانات TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID.'
@@ -267,19 +267,21 @@ def send_telegram_notification(message):
     return
 
   url_msg = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
-  payload = {
-      'chat_id': TELEGRAM_CHAT_ID,
-      'text': message,
-      'parse_mode': 'Markdown',
-  }
+
+  # تم إزالة parse_mode مؤقتاً لضمان عدم رفض الرسالة بسبب أخطاء التنسيق
+  payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message}
+
   try:
-    response = requests.post(url_msg, json=payload, timeout=15)
+    response = requests.post(url_msg, json=payload, timeout=20)
+    print(f'🔹 حالة الاستجابة من تلجرام: {response.status_code}')
+    print(f'🔹 محتوى الاستجابة: {response.text}')
+
     if response.status_code == 200:
       print('✅ تم إرسال الرسالة بنجاح إلى التلجرام.')
     else:
-      print(f'❌ فشل الإرسال: {response.text}')
+      print(f'❌ فشل الإرسال من سيرفر تلجرام: {response.text}')
   except Exception as e:
-    print(f'❌ خطأ إرسال التلجرام: {e}')
+    print(f'❌ خطأ إتصال أثناء الإرسال: {e}')
 
 
 def find_steel_supports_optimized(df):
@@ -464,7 +466,7 @@ def run_comprehensive_backtest():
         open_trades.extend(res)
 
   if open_trades:
-    msg = '🚀 **نتائج فحص البورصة المصرية اليوم:**\n\n'
+    msg = '🚀 نتائج فحص البورصة المصرية اليوم:\n\n'
     for row in open_trades:
       return_str = (
           f"{row['Return']:.2f}%"
@@ -472,15 +474,18 @@ def run_comprehensive_backtest():
           else f"+{row['Return']:.2f}%"
       )
 
-      msg += f"📈 **السهم**: `{row['Ticker']}`\n"
-      msg += f"📩 **سعر الدخول المقترح**: `{row['Entry_Price']}`\n"
-      msg += f"💲 **السعر الحالي**: `{row['Current_Price']}`\n"
-      msg += f"📊 **العائد العائم**: `{return_str}`\n"
-      msg += f"🎯 **الهدف (+5%)**: `{row['Target_Price']}`\n"
-      msg += f"🛑 **وقف الخسارة (-4%)**: `{row['Stop_Price']}`\n"
+      msg += f"📈 السهم: {row['Ticker']}\n"
+      msg += f"📩 سعر الدخول المقترح: {row['Entry_Price']}\n"
+      msg += f"💲 السعر الحالي: {row['Current_Price']}\n"
+      msg += f"📊 العائد العائم: {return_str}\n"
+      msg += f"🎯 الهدف (+5%): {row['Target_Price']}\n"
+      msg += f"🛑 وقف الخسارة (-4%): {row['Stop_Price']}\n"
       msg += '=============\n'
   else:
-    msg = '⚠️ **تقرير الفحص اليومي:**\nتم فحص جميع الأسهم بنجاح، ولا توجد فرص تنطبق عليها الشروط حالياً.'
+    msg = (
+        '⚠️ تقرير الفحص اليومي:\nتم فحص جميع الأسهم بنجاح، ولا توجد فرص تنطبق'
+        ' عليها الشروط حالياً.'
+    )
 
   # إرسال الرسالة إلى التلجرام
   send_telegram_notification(msg)
