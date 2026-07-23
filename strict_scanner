@@ -71,7 +71,7 @@ class SuppressStdOut:
 
 
 def send_telegram_notification(message):
-    """إرسال نص الرسالة إلى جميع الـ Chat IDs المسجلة (الخاص والجروبات)"""
+    """إرسال نص الرسالة إلى جميع الـ Chat IDs المسجلة (الخاص والجروبات/القنوات)"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print('⚠️ لم يتم العثور على بيانات TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID.')
         return
@@ -285,7 +285,7 @@ def run_comprehensive_backtest():
             '⚠️ تقرير الفحص اليومي:\nتم فحص جميع الأسهم بنجاح، ولا توجد فرص تنطبق عليها الشروط حالياً.'
         )
 
-    # إرسال الرسالة إلى التلجرام
+    # إرسال الرسالة إلى التلجرام (للخاص والقناة معا)
     send_telegram_notification(msg)
 
 
