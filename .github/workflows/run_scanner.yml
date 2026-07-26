@@ -1,8 +1,6 @@
 name: Daily EGX Market Scan
 
 on:
-  schedule:
-    - cron: '0 7 * * *'  # 9:00 AM Cairo Time
   workflow_dispatch:
   repository_dispatch:
     types: [run-scanner]
