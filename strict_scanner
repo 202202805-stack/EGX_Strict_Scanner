@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import requests
-
 import yfinance as yf
 
 # --- إعدادات التلجرام المحدثة ---
@@ -71,12 +70,11 @@ class SuppressStdOut:
 
 
 def send_telegram_notification(message):
-    """إرسال نص الرسالة إلى جميع الـ Chat IDs المسجلة (الخاص والجروبات/القنوات)"""
+    """إرسال نص الرسالة إلى جميع الـ Chat IDs المسجلة"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print('⚠️ لم يتم العثور على بيانات TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID.')
         return
 
-    # تفكيك قائمة الـ Chat IDs بناءً على الفاصلة
     chat_ids = [c.strip() for c in TELEGRAM_CHAT_ID.split(",") if c.strip()]
     url_msg = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
 
@@ -84,7 +82,6 @@ def send_telegram_notification(message):
         payload = {'chat_id': chat_id, 'text': message}
         try:
             response = requests.post(url_msg, json=payload, timeout=20)
-            print(f'🔹 حالة الاستجابة لـ ({chat_id}): {response.status_code}')
             if response.status_code == 200:
                 print(f'✅ تم إرسال الرسالة بنجاح إلى ({chat_id}).')
             else:
@@ -145,6 +142,7 @@ def process_stock(ticker, start_dt, end_dt):
         with SuppressStdOut():
             ticker_obj = yf.Ticker(ticker)
             splits = ticker_obj.splits
+            # تنزيل البيانات لضمان شمول تاريخ اليوم
             df = yf.download(
                 ticker,
                 start=start_dt,
@@ -216,28 +214,29 @@ def process_stock(ticker, start_dt, end_dt):
                             break
 
             else:
+                # استخدام الإعدادات المحددة في الثوابت بشكل دقيق
                 target = entry_day_close * (1 + TARGET_PROFIT)
                 stop = entry_p * (1 - STOP_LOSS)
 
-                if highs[i] >= target:
-                    in_pos, cooldown_until_idx = False, i + 14
-
-                elif lows[i] <= stop:
-                    in_pos, cooldown_until_idx = False, i + 1
-
-                elif i == len(df) - 1:
-                    current_return = ((closes[i] - entry_day_close) / entry_day_close) * 100
-                    target_price = entry_day_close * 1.05
-                    stop_price = entry_p * 0.96
+                # إذا كنا في اليوم الأخير وما زالت الصفقة مفتوحة
+                if i == len(df) - 1:
+                    current_price = closes[i]
+                    current_return = ((current_price - entry_p) / entry_p) * 100
 
                     trades.append({
                         'Ticker': ticker,
                         'Entry_Price': round(entry_p, 2),
-                        'Current_Price': round(closes[i], 2),
+                        'Current_Price': round(current_price, 2),
                         'Return': current_return,
-                        'Target_Price': round(target_price, 2),
-                        'Stop_Price': round(stop_price, 2),
+                        'Target_Price': round(target, 2),
+                        'Stop_Price': round(stop, 2),
                     })
+
+                elif highs[i] >= target:
+                    in_pos, cooldown_until_idx = False, i + 14
+
+                elif lows[i] <= stop:
+                    in_pos, cooldown_until_idx = False, i + 1
 
     except Exception:
         pass
@@ -245,8 +244,9 @@ def process_stock(ticker, start_dt, end_dt):
 
 
 def run_comprehensive_backtest():
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=10 * 365)
+    # إضافة يوم إضافي لضمان شمول بيانات اليوم الحالية
+    end_date = datetime.now() + timedelta(days=1)
+    start_date = datetime.now() - timedelta(days=10 * 365)
 
     start_str = start_date.strftime('%Y-%m-%d')
     end_str = end_date.strftime('%Y-%m-%d')
@@ -280,12 +280,14 @@ def run_comprehensive_backtest():
             msg += f"🎯 الهدف (+5%): {row['Target_Price']}\n"
             msg += f"🛑 وقف الخسارة (-4%): {row['Stop_Price']}\n"
             msg += '=============\n'
+        print(msg)
     else:
         msg = (
             '⚠️ تقرير الفحص اليومي:\nتم فحص جميع الأسهم بنجاح، ولا توجد فرص تنطبق عليها الشروط حالياً.'
         )
+        print(msg)
 
-    # إرسال الرسالة إلى التلجرام (للخاص والقناة معا)
+    # إرسال الرسالة إلى التلجرام
     send_telegram_notification(msg)
 
 
