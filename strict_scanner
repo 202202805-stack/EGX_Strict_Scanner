@@ -8,7 +8,7 @@ import pandas as pd
 import requests
 import yfinance as yf
 
-# --- إعدادات التلجرام المحدثة ---
+# --- إعدادات التلجرام ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -21,7 +21,6 @@ TARGET_PROFIT = 0.05
 STOP_LOSS = 0.04
 MAX_ENTRY_SLIPPAGE = 0.013
 
-# قائمة الأسهم المصرية
 egyptian_stocks = [
     "FWRY.CA", "GBCO.CA", "PHDC.CA", "ORHD.CA", "ZMID.CA", "CSAG.CA", "ETEL.CA",
     "ENGC.CA", "COSG.CA", "POUL.CA", "ISMA.CA", "RAYA.CA", "MTIE.CA", "SKPC.CA",
@@ -70,7 +69,6 @@ class SuppressStdOut:
 
 
 def send_telegram_notification(message):
-    """إرسال نص الرسالة إلى جميع الـ Chat IDs المسجلة"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print('⚠️ لم يتم العثور على بيانات TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID.')
         return
@@ -140,8 +138,7 @@ def process_stock(ticker, start_dt, end_dt):
     trades = []
     try:
         with SuppressStdOut():
-            ticker_obj = yf.Ticker(ticker)
-            splits = ticker_obj.splits
+            # التعديل: تفعيل auto_adjust يتعامل تلقائياً مع التجزئة والتوزيعات في الأسعار
             df = yf.download(
                 ticker,
                 start=start_dt,
@@ -160,13 +157,8 @@ def process_stock(ticker, start_dt, end_dt):
         df.columns = [c.lower() for c in df.columns]
         df.index = pd.to_datetime(df.index).date
 
+        # وضع قيمة default للـ segment لتجنب الطلبات الإضافية لـ yf.Ticker
         df['segment'] = 0
-        if not splits.empty:
-            split_dates = pd.to_datetime(splits.index).date
-            segment = 0
-            for d in split_dates:
-                segment += 1
-                df.loc[df.index >= d, 'segment'] = segment
 
         lows, highs, closes, opens = (
             df['low'].values,
@@ -213,13 +205,21 @@ def process_stock(ticker, start_dt, end_dt):
                             break
 
             else:
-                # Target بناءً على سعر إغلاق يوم الدخول (entry_day_close)
+                # Target من سعر إغلاق اليوم الذي تحقق فيه شرط الدخول
                 target = entry_day_close * (1 + TARGET_PROFIT)
-                # Stop Loss بناءً على سعر الدعم المحدد (entry_p)
+                # Stop Loss من سعر الدعم المحدد الفعلي
                 stop = entry_p * (1 - STOP_LOSS)
 
-                if i == len(df) - 1:
+                # الخروج عند ضرب الهدف أو وقف الخسارة
+                if lows[i] <= stop:
+                    in_pos, cooldown_until_idx = False, i + 1
+                elif highs[i] >= target:
+                    in_pos, cooldown_until_idx = False, i + 14
+
+                # إذا وصلنا لآخر يوم وكانت الصفقة ما زالت مفتوحة
+                elif i == len(df) - 1:
                     current_price = closes[i]
+                    # العائد العائم يحسب بدقة مقارنة بإغلاق يوم الدخول
                     current_return = ((current_price - entry_day_close) / entry_day_close) * 100
 
                     trades.append({
@@ -233,14 +233,10 @@ def process_stock(ticker, start_dt, end_dt):
                         'Stop_Price': round(stop, 2),
                     })
 
-                elif highs[i] >= target:
-                    in_pos, cooldown_until_idx = False, i + 14
+    except Exception as e:
+        # طباعة الخطأ لمعرفته بدلاً من إخفائه الصامت
+        print(f"⚠️ خطأ في معالجة السهم {ticker}: {e}")
 
-                elif lows[i] <= stop:
-                    in_pos, cooldown_until_idx = False, i + 1
-
-    except Exception:
-        pass
     return trades
 
 
