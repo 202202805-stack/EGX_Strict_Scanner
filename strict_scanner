@@ -213,13 +213,13 @@ def process_stock(ticker, start_dt, end_dt):
                             break
 
             else:
-                # لحساب الهدف ووقف الخسارة بناءً على سعر إغلاق يوم الدخول
+                # Target بناءً على سعر إغلاق يوم الدخول (entry_day_close)
                 target = entry_day_close * (1 + TARGET_PROFIT)
-                stop = entry_day_close * (1 - STOP_LOSS)
+                # Stop Loss بناءً على سعر الدعم المحدد (entry_p)
+                stop = entry_p * (1 - STOP_LOSS)
 
                 if i == len(df) - 1:
                     current_price = closes[i]
-                    # تم تغيير حساب العائد ليقاس من سعر إغلاق يوم الدخول بدلاً من الدعم
                     current_return = ((current_price - entry_day_close) / entry_day_close) * 100
 
                     trades.append({
