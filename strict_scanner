@@ -142,7 +142,6 @@ def process_stock(ticker, start_dt, end_dt):
         with SuppressStdOut():
             ticker_obj = yf.Ticker(ticker)
             splits = ticker_obj.splits
-            # تنزيل البيانات لضمان شمول تاريخ اليوم
             df = yf.download(
                 ticker,
                 start=start_dt,
@@ -214,17 +213,16 @@ def process_stock(ticker, start_dt, end_dt):
                             break
 
             else:
-                # استخدام الإعدادات المحددة في الثوابت بشكل دقيق
                 target = entry_day_close * (1 + TARGET_PROFIT)
                 stop = entry_p * (1 - STOP_LOSS)
 
-                # إذا كنا في اليوم الأخير وما زالت الصفقة مفتوحة
                 if i == len(df) - 1:
                     current_price = closes[i]
                     current_return = ((current_price - entry_p) / entry_p) * 100
 
                     trades.append({
                         'Ticker': ticker,
+                        'Entry_Date': str(entry_d),
                         'Entry_Price': round(entry_p, 2),
                         'Current_Price': round(current_price, 2),
                         'Return': current_return,
@@ -244,7 +242,6 @@ def process_stock(ticker, start_dt, end_dt):
 
 
 def run_comprehensive_backtest():
-    # إضافة يوم إضافي لضمان شمول بيانات اليوم الحالية
     end_date = datetime.now() + timedelta(days=1)
     start_date = datetime.now() - timedelta(days=10 * 365)
 
@@ -274,6 +271,7 @@ def run_comprehensive_backtest():
             )
 
             msg += f"📈 السهم: {row['Ticker']}\n"
+            msg += f"📅 تاريخ الدخول: {row['Entry_Date']}\n"
             msg += f"📩 سعر الدخول المقترح: {row['Entry_Price']}\n"
             msg += f"💲 السعر الحالي: {row['Current_Price']}\n"
             msg += f"📊 العائد العائم: {return_str}\n"
@@ -287,7 +285,6 @@ def run_comprehensive_backtest():
         )
         print(msg)
 
-    # إرسال الرسالة إلى التلجرام
     send_telegram_notification(msg)
 
 
