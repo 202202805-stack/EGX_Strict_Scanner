@@ -213,17 +213,20 @@ def process_stock(ticker, start_dt, end_dt):
                             break
 
             else:
+                # لحساب الهدف ووقف الخسارة بناءً على سعر إغلاق يوم الدخول
                 target = entry_day_close * (1 + TARGET_PROFIT)
-                stop = entry_p * (1 - STOP_LOSS)
+                stop = entry_day_close * (1 - STOP_LOSS)
 
                 if i == len(df) - 1:
                     current_price = closes[i]
-                    current_return = ((current_price - entry_p) / entry_p) * 100
+                    # تم تغيير حساب العائد ليقاس من سعر إغلاق يوم الدخول بدلاً من الدعم
+                    current_return = ((current_price - entry_day_close) / entry_day_close) * 100
 
                     trades.append({
                         'Ticker': ticker,
                         'Entry_Date': str(entry_d),
                         'Entry_Price': round(entry_p, 2),
+                        'Entry_Close': round(entry_day_close, 2),
                         'Current_Price': round(current_price, 2),
                         'Return': current_return,
                         'Target_Price': round(target, 2),
@@ -272,11 +275,12 @@ def run_comprehensive_backtest():
 
             msg += f"📈 السهم: {row['Ticker']}\n"
             msg += f"📅 تاريخ الدخول: {row['Entry_Date']}\n"
-            msg += f"📩 سعر الدخول المقترح: {row['Entry_Price']}\n"
+            msg += f"📩 سعر الدعم (الدخول): {row['Entry_Price']}\n"
+            msg += f"🔔 سعر إغلاق يوم الدخول: {row['Entry_Close']}\n"
             msg += f"💲 السعر الحالي: {row['Current_Price']}\n"
             msg += f"📊 العائد العائم: {return_str}\n"
-            msg += f"🎯 الهدف (+5%): {row['Target_Price']}\n"
-            msg += f"🛑 وقف الخسارة (-4%): {row['Stop_Price']}\n"
+            msg += f"🎯 الهدف (+5% من الإغلاق): {row['Target_Price']}\n"
+            msg += f"🛑 وقف الخسارة (-4% من الإغلاق): {row['Stop_Price']}\n"
             msg += '=============\n'
         print(msg)
     else:
