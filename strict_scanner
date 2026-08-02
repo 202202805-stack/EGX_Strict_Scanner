@@ -19,7 +19,7 @@ MIN_DAYS_GAP = 20
 REJECTION_POWER = 0.16
 TARGET_PROFIT = 0.05
 STOP_LOSS = 0.04
-MAX_ENTRY_SLIPPAGE = 0.015
+MAX_ENTRY_SLIPPAGE = 0.013
 
 # قائمة الأسهم المصرية
 egyptian_stocks = [
