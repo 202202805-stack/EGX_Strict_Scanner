@@ -19,7 +19,7 @@ MIN_DAYS_GAP = 20
 REJECTION_POWER = 0.16
 TARGET_PROFIT = 0.05
 STOP_LOSS = 0.04
-MAX_ENTRY_SLIPPAGE = 0.015
+MAX_ENTRY_SLIPPAGE = 0.013
 
 # قائمة الأسهم المصرية
 egyptian_stocks = [
@@ -275,12 +275,12 @@ def run_comprehensive_backtest():
 
             msg += f"📈 السهم: {row['Ticker']}\n"
             msg += f"📅 تاريخ الدخول: {row['Entry_Date']}\n"
-            msg += f"📩 سعر الدعم (الدخول): {row['Entry_Price']}\n"
+            msg += f"📩 سعر الدعم: {row['Entry_Price']}\n"
             msg += f"🔔 سعر إغلاق يوم الدخول: {row['Entry_Close']}\n"
             msg += f"💲 السعر الحالي: {row['Current_Price']}\n"
             msg += f"📊 العائد العائم: {return_str}\n"
-            msg += f"🎯 الهدف (+5% من الإغلاق): {row['Target_Price']}\n"
-            msg += f"🛑 وقف الخسارة (-4% من الإغلاق): {row['Stop_Price']}\n"
+            msg += f"🎯 الهدف : {row['Target_Price']}\n"
+            msg += f"🛑 وقف الخسارة : {row['Stop_Price']}\n"
             msg += '=============\n'
         print(msg)
     else:
