@@ -13,6 +13,7 @@ import yfinance as yf
 # --- إعدادات التلجرام من متغيرات البيئة ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+CACHE_FILE = "last_sent.txt"
 
 # --- الإعدادات الفنية ---
 LOOKBACK = 7
@@ -81,24 +82,24 @@ class SuppressStdOut:
         sys.stderr = self._original_stderr
 
 
-def get_last_telegram_message():
-    """جلب آخر رسالة صادرة لمنع التكرار على GitHub Actions"""
-    if not TELEGRAM_BOT_TOKEN:
-        return ""
-    
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-    try:
-        response = requests.get(url, params={"limit": 10, "offset": -10}, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("ok") and data.get("result"):
-                for result in reversed(data["result"]):
-                    msg_obj = result.get("channel_post") or result.get("message")
-                    if msg_obj and "text" in msg_obj:
-                        return msg_obj["text"].strip()
-    except Exception as e:
-        print(f"⚠️ تعذر جلب آخر رسالة من التلجرام: {e}")
+def get_last_sent_from_file():
+    """قراءة آخر رسالة تم إرسالها والمحفوظة في ملف الكاش"""
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except Exception as e:
+            print(f"⚠️ خطأ في قراءة ملف الكاش: {e}")
     return ""
+
+
+def save_last_sent_to_file(message):
+    """حفظ الرسالة الجديدة في ملف الكاش"""
+    try:
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            f.write(message.strip())
+    except Exception as e:
+        print(f"⚠️ خطأ في حفظ ملف الكاش: {e}")
 
 
 def send_telegram_notification(message):
@@ -106,25 +107,31 @@ def send_telegram_notification(message):
         print('⚠️ لم يتم العثور على بيانات TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID.')
         return
 
-    # فحص منع التكرار مع التلجرام
-    last_msg = get_last_telegram_message()
-    if last_msg and last_msg.strip() == message.strip():
-        print("⏸️ الرسالة مطابقة تماماً لآخر رسالة تم إرسالها (البيانات لم تتحدث على المنصة بعد). تم إلغاء الإرسال.")
+    # --- فحص التكرار من الكاش المحلي ---
+    last_msg = get_last_sent_from_file()
+    if last_msg and last_msg == message.strip():
+        print("⏸️ الرسالة مطابقة تماماً لآخر رسالة تم إرسالها. تم إلغاء الإرسال وتجنب التكرار.")
         return
 
     chat_ids = [c.strip() for c in TELEGRAM_CHAT_ID.split(",") if c.strip()]
     url_msg = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
 
+    sent_success = False
     for chat_id in chat_ids:
         payload = {'chat_id': chat_id, 'text': message}
         try:
             response = requests.post(url_msg, json=payload, timeout=20)
             if response.status_code == 200:
                 print(f'✅ تم إرسال الرسالة بنجاح إلى ({chat_id}).')
+                sent_success = True
             else:
                 print(f'❌ فشل الإرسال إلى ({chat_id}): {response.text}')
         except Exception as e:
             print(f'❌ خطأ إتصال أثناء الإرسال لـ ({chat_id}): {e}')
+
+    # حفظ الرسالة فقط في حالة نجاح الإرسال
+    if sent_success:
+        save_last_sent_to_file(message)
 
 
 def find_steel_supports_optimized(df):
@@ -297,7 +304,7 @@ def single_pass_backtest():
             if res:
                 open_trades.extend(res)
 
-    # اختيار أكثر تاريخ متكرر كـ "تاريخ أحدث جلسة بيانات"
+    # تحويل تاريخ آخر جلسة للغة العربية
     data_date_str = ""
     if latest_dates:
         most_common_date = Counter(latest_dates).most_common(1)[0][0]
@@ -340,7 +347,6 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
             trade_data = latest_trade_info[ticker]
             confirmed_trades.append(trade_data)
 
-    # صياغة الرسالة إضافة يوم وتاريخ بيانات الجلسة
     header_date = f" (جلسة {detected_data_date})" if detected_data_date else ""
 
     if confirmed_trades:
