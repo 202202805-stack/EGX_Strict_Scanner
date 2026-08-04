@@ -371,7 +371,3 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
 
 if __name__ == '__main__':
     run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=10)
-
-
-if __name__ == '__main__':
-    run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=10)
