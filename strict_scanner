@@ -10,7 +10,7 @@ import pandas as pd
 import requests
 import yfinance as yf
 
-# --- إعدادات التلجرام ---
+# --- إعدادات التلجرام من متغيرات البيئة ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -22,6 +22,17 @@ REJECTION_POWER = 0.16
 TARGET_PROFIT = 0.05
 STOP_LOSS = 0.04
 MAX_ENTRY_SLIPPAGE = 0.013
+
+# قاموس ترجمة أسماء الأيام للعربية
+DAYS_ARABIC = {
+    "Saturday": "السبت",
+    "Sunday": "الأحد",
+    "Monday": "الإثنين",
+    "Tuesday": "الثلاثاء",
+    "Wednesday": "الأربعاء",
+    "Thursday": "الخميس",
+    "Friday": "الجمعة",
+}
 
 egyptian_stocks = [
     "FWRY.CA", "GBCO.CA", "PHDC.CA", "ORHD.CA", "ZMID.CA", "CSAG.CA", "ETEL.CA",
@@ -70,9 +81,35 @@ class SuppressStdOut:
         sys.stderr = self._original_stderr
 
 
+def get_last_telegram_message():
+    """جلب آخر رسالة صادرة لمنع التكرار على GitHub Actions"""
+    if not TELEGRAM_BOT_TOKEN:
+        return ""
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    try:
+        response = requests.get(url, params={"limit": 10, "offset": -10}, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("ok") and data.get("result"):
+                for result in reversed(data["result"]):
+                    msg_obj = result.get("channel_post") or result.get("message")
+                    if msg_obj and "text" in msg_obj:
+                        return msg_obj["text"].strip()
+    except Exception as e:
+        print(f"⚠️ تعذر جلب آخر رسالة من التلجرام: {e}")
+    return ""
+
+
 def send_telegram_notification(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print('⚠️ لم يتم العثور على بيانات TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID.')
+        return
+
+    # فحص منع التكرار مع التلجرام
+    last_msg = get_last_telegram_message()
+    if last_msg and last_msg.strip() == message.strip():
+        print("⏸️ الرسالة مطابقة تماماً لآخر رسالة تم إرسالها (البيانات لم تتحدث على المنصة بعد). تم إلغاء الإرسال.")
         return
 
     chat_ids = [c.strip() for c in TELEGRAM_CHAT_ID.split(",") if c.strip()]
@@ -150,13 +187,16 @@ def process_stock(ticker, start_dt, end_dt):
             )
 
         if df.empty or len(df) < 50:
-            return trades
+            return trades, None
 
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
         df.columns = [c.lower() for c in df.columns]
         df.index = pd.to_datetime(df.index).date
+
+        # معرفة تاريخ اليوم الأخير من البيانات المسحوبة
+        last_data_date = df.index[-1]
 
         df['segment'] = 0
 
@@ -230,12 +270,12 @@ def process_stock(ticker, start_dt, end_dt):
 
     except Exception as e:
         print(f"⚠️ خطأ في معالجة السهم {ticker}: {e}")
+        return [], None
 
-    return trades
+    return trades, last_data_date
 
 
 def single_pass_backtest():
-    """تشغيل دورة فحص واحدة لجميع الأسهم وترجيع الصفقات المفتوحة"""
     end_date = datetime.now() + timedelta(days=1)
     start_date = datetime.now() - timedelta(days=10 * 365)
 
@@ -243,55 +283,68 @@ def single_pass_backtest():
     end_str = end_date.strftime('%Y-%m-%d')
 
     open_trades = []
+    latest_dates = []
+
     with ProcessPoolExecutor() as executor:
         futures = {
             executor.submit(process_stock, ticker, start_str, end_str): ticker
             for ticker in egyptian_stocks
         }
         for future in as_completed(futures):
-            res = future.result()
+            res, stock_last_date = future.result()
+            if stock_last_date:
+                latest_dates.append(stock_last_date)
             if res:
                 open_trades.extend(res)
-                
-    return open_trades
+
+    # اختيار أكثر تاريخ متكرر كـ "تاريخ أحدث جلسة بيانات"
+    data_date_str = ""
+    if latest_dates:
+        most_common_date = Counter(latest_dates).most_common(1)[0][0]
+        day_english = most_common_date.strftime("%A")
+        day_arabic = DAYS_ARABIC.get(day_english, day_english)
+        data_date_str = f"{day_arabic} {most_common_date.strftime('%d/%m/%Y')}"
+
+    return open_trades, data_date_str
 
 
 def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=10):
-    """
-    تنفيذ الفحص 3 مرات برمجياً، واعتماد الصفقة إذا ظهرت
-    في مرتين أو أكثر (min_occurrences=2) بدون إظهار أي تفاصيل عن الدورات في رسالة التلجرام.
-    """
     print(f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 بدء الفحص المركب ({total_checks} دورات داخلية)...")
 
     ticker_counts = Counter()
     latest_trade_info = {}
+    detected_data_date = ""
 
     for check_num in range(1, total_checks + 1):
         print(f"🔄 [دورة {check_num}/{total_checks}] جاري سحب البيانات واستخراج الفرص...")
-        trades = single_pass_backtest()
+        trades, data_date_str = single_pass_backtest()
         
+        if data_date_str:
+            detected_data_date = data_date_str
+
         found_tickers = []
         for trade in trades:
             t = trade['Ticker']
             found_tickers.append(t)
             latest_trade_info[t] = trade
-        
+
         ticker_counts.update(found_tickers)
-        print(f"   ✓ تم العثور على {len(found_tickers)} صفقة في هذه الدورة.")
+        print(f"   ✓ تم العثور على {len(found_tickers)} صفقة في هذه الدورة (جلسة: {detected_data_date}).")
 
         if check_num < total_checks and delay_between_checks > 0:
             time.sleep(delay_between_checks)
 
-    # --- فلترة الأسهم التي ظهرت في مرتين أو أكثر داخلياً ---
     confirmed_trades = []
     for ticker, count in ticker_counts.items():
         if count >= min_occurrences:
             trade_data = latest_trade_info[ticker]
             confirmed_trades.append(trade_data)
 
-    # --- بناء إشعار التلجرام والطباعة (بدون ذكر عدد الدورات أو النسبة) ---
+    # صياغة الرسالة إضافة يوم وتاريخ بيانات الجلسة
+    header_date = f" (جلسة {detected_data_date})" if detected_data_date else ""
+
     if confirmed_trades:
-        msg = "🚀 نتائج فحص البورصة المصرية اليوم:\n\n"
+        msg = f"🚀 نتائج فحص البورصة المصرية{header_date}:\n\n"
         for row in confirmed_trades:
             return_str = (
                 f"{row['Return']:.2f}%"
@@ -310,10 +363,14 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
             msg += '=============\n'
         print("\n" + msg)
     else:
-        msg = '⚠️ تقرير الفحص اليومي:\nتم فحص جميع الأسهم بنجاح، ولا توجد فرص تنطبق عليها الشروط حالياً.'
+        msg = f"⚠️ تقرير الفحص اليومي{header_date}:\nتم فحص جميع الأسهم بنجاح، ولا توجد فرص تنطبق عليها الشروط حالياً."
         print("\n" + msg)
 
     send_telegram_notification(msg)
+
+
+if __name__ == '__main__':
+    run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=10)
 
 
 if __name__ == '__main__':
