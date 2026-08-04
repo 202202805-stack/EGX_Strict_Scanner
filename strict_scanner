@@ -1,5 +1,7 @@
 import os
 import sys
+import time
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
@@ -138,7 +140,6 @@ def process_stock(ticker, start_dt, end_dt):
     trades = []
     try:
         with SuppressStdOut():
-            # التعديل: تفعيل auto_adjust يتعامل تلقائياً مع التجزئة والتوزيعات في الأسعار
             df = yf.download(
                 ticker,
                 start=start_dt,
@@ -157,7 +158,6 @@ def process_stock(ticker, start_dt, end_dt):
         df.columns = [c.lower() for c in df.columns]
         df.index = pd.to_datetime(df.index).date
 
-        # وضع قيمة default للـ segment لتجنب الطلبات الإضافية لـ yf.Ticker
         df['segment'] = 0
 
         lows, highs, closes, opens = (
@@ -205,21 +205,16 @@ def process_stock(ticker, start_dt, end_dt):
                             break
 
             else:
-                # Target من سعر إغلاق اليوم الذي تحقق فيه شرط الدخول
                 target = entry_day_close * (1 + TARGET_PROFIT)
-                # Stop Loss من سعر الدعم المحدد الفعلي
                 stop = entry_p * (1 - STOP_LOSS)
 
-                # الخروج عند ضرب الهدف أو وقف الخسارة
                 if lows[i] <= stop:
                     in_pos, cooldown_until_idx = False, i + 1
                 elif highs[i] >= target:
                     in_pos, cooldown_until_idx = False, i + 14
 
-                # إذا وصلنا لآخر يوم وكانت الصفقة ما زالت مفتوحة
                 elif i == len(df) - 1:
                     current_price = closes[i]
-                    # العائد العائم يحسب بدقة مقارنة بإغلاق يوم الدخول
                     current_return = ((current_price - entry_day_close) / entry_day_close) * 100
 
                     trades.append({
@@ -234,20 +229,18 @@ def process_stock(ticker, start_dt, end_dt):
                     })
 
     except Exception as e:
-        # طباعة الخطأ لمعرفته بدلاً من إخفائه الصامت
         print(f"⚠️ خطأ في معالجة السهم {ticker}: {e}")
 
     return trades
 
 
-def run_comprehensive_backtest():
+def single_pass_backtest():
+    """تشغيل دورة فحص واحدة لجميع الأسهم وترجيع الصفقات المفتوحة"""
     end_date = datetime.now() + timedelta(days=1)
     start_date = datetime.now() - timedelta(days=10 * 365)
 
     start_str = start_date.strftime('%Y-%m-%d')
     end_str = end_date.strftime('%Y-%m-%d')
-
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 تشغيل الفحص وتجهيز التقرير...")
 
     open_trades = []
     with ProcessPoolExecutor() as executor:
@@ -259,10 +252,48 @@ def run_comprehensive_backtest():
             res = future.result()
             if res:
                 open_trades.extend(res)
+                
+    return open_trades
 
-    if open_trades:
-        msg = '🚀 نتائج فحص البورصة المصرية اليوم:\n\n'
-        for row in open_trades:
+
+def run_majority_check(total_checks=5, min_occurrences=3, delay_between_checks=10):
+    """
+    تنفيذ الفحص عدد (total_checks) من المرات، واعتماد الصفقة فقط إذا ظهرت
+    في عدد (min_occurrences) من المرات أو أكثر.
+    """
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 بدء الفحص المركب ({total_checks} مرات - شرط الاعتماد: {min_occurrences}/{total_checks})...\n")
+
+    ticker_counts = Counter()
+    latest_trade_info = {}
+
+    for check_num in range(1, total_checks + 1):
+        print(f"🔄 [فحص {check_num}/{total_checks}] جاري سحب البيانات واستخراج الفرص...")
+        trades = single_pass_backtest()
+        
+        found_tickers = []
+        for trade in trades:
+            t = trade['Ticker']
+            found_tickers.append(t)
+            latest_trade_info[t] = trade  # الاحتفاظ بأحدث بيانات للسهم
+        
+        ticker_counts.update(found_tickers)
+        print(f"   ✓ تم العثور على {len(found_tickers)} صفقة في هذا الفحص.")
+
+        if check_num < total_checks and delay_between_checks > 0:
+            time.sleep(delay_between_checks)
+
+    # --- فلترة الأسهم التي حققت شرط الأغلبية (3 مرات أو أكثر) ---
+    confirmed_trades = []
+    for ticker, count in ticker_counts.items():
+        if count >= min_occurrences:
+            trade_data = latest_trade_info[ticker]
+            trade_data['Confidence'] = f"{count}/{total_checks}"
+            confirmed_trades.append(trade_data)
+
+    # --- بناء إشعار التلجرام والطباعة ---
+    if confirmed_trades:
+        msg = f"🚀 تقرير الفحص المؤكد (تكرار {min_occurrences}+ من أصل {total_checks}):\n\n"
+        for row in confirmed_trades:
             return_str = (
                 f"{row['Return']:.2f}%"
                 if row['Return'] < 0
@@ -270,23 +301,27 @@ def run_comprehensive_backtest():
             )
 
             msg += f"📈 السهم: {row['Ticker']}\n"
+            msg += f"📊 نسبة التأكيد: {row['Confidence']} فحوصات\n"
             msg += f"📅 تاريخ الدخول: {row['Entry_Date']}\n"
             msg += f"📩 سعر الدعم: {row['Entry_Price']}\n"
             msg += f"🔔 سعر إغلاق يوم الدخول: {row['Entry_Close']}\n"
             msg += f"💲 السعر الحالي: {row['Current_Price']}\n"
-            msg += f"📊 العائد العائم: {return_str}\n"
+            msg += f"📈 العائد العائم: {return_str}\n"
             msg += f"🎯 الهدف : {row['Target_Price']}\n"
             msg += f"🛑 وقف الخسارة : {row['Stop_Price']}\n"
             msg += '=============\n'
-        print(msg)
+        print("\n" + msg)
     else:
         msg = (
-            '⚠️ تقرير الفحص اليومي:\nتم فحص جميع الأسهم بنجاح، ولا توجد فرص تنطبق عليها الشروط حالياً.'
+            f"⚠️ تقرير الفحص المؤكد ({total_checks} فحوصات):\n"
+            f"تم فحص جميع الأسهم {total_checks} مرات، ولم تتكرر أي صفقة {min_occurrences} مرات أو أكثر لضمان الدقة."
         )
-        print(msg)
+        print("\n" + msg)
 
     send_telegram_notification(msg)
 
 
 if __name__ == '__main__':
-    run_comprehensive_backtest()
+    # تشغيل 5 فحوصات متتالية، واعتماد أي سهم يظهر في 3 فحوصات على الأقل
+    # delay_between_checks: ثوانٍ بين كل فحص والآخر (10 ثوانٍ افتراضياً)
+    run_majority_check(total_checks=5, min_occurrences=3, delay_between_checks=10)
