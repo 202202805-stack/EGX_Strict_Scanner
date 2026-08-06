@@ -185,6 +185,7 @@ def process_stock(ticker, start_dt, end_dt):
     trades = []
     try:
         with SuppressStdOut():
+            # [تعديل 1]: إضافة ignore_tz=True لضمان السحب السليم بالتوقيت المحلي
             df = yf.download(
                 ticker,
                 start=start_dt,
@@ -192,6 +193,7 @@ def process_stock(ticker, start_dt, end_dt):
                 interval='1d',
                 progress=False,
                 auto_adjust=True,
+                ignore_tz=True,
             )
 
         if df.empty or len(df) < 50:
@@ -202,11 +204,11 @@ def process_stock(ticker, start_dt, end_dt):
 
         df.columns = [c.lower() for c in df.columns]
         
-        # ثغرة 1: الترتيب التصاعدي المؤكد
+        # إجبار الترتيب التصاعدي
         df = df.sort_index(ascending=True)
         df.index = pd.to_datetime(df.index).date
 
-        # معرفة تاريخ اليوم الأخير من البيانات المسحوبة
+        # تاريخ آخر جلسة موجودة بالفضاء
         last_data_date = df.index[-1]
 
         df['segment'] = 0
@@ -224,13 +226,11 @@ def process_stock(ticker, start_dt, end_dt):
         entry_p, entry_d, entry_day_close = 0, None, 0
         cooldown_until_idx = -1
 
-        # ثغرة 2: رفع حد البداية لضمان كفاية البيانات للحساب الفني
         for i in range(50, len(df)):
             if not in_pos:
                 if i < cooldown_until_idx:
                     continue
 
-                # ثغرة 3: توحيد المصفوفتين لـ Numpy لتسريع الأداء وتجنب خطأ التراصف
                 available_supports = [
                     l for l in all_steel_levels
                     if l['active_from_idx'] <= i and l['segment'] == segments[i]
@@ -265,7 +265,7 @@ def process_stock(ticker, start_dt, end_dt):
                 elif highs[i] >= target:
                     in_pos, cooldown_until_idx = False, i + 14
 
-                # ثغرة 4: التقاط الصفقة إذا كانت ما زالت مفتوحة في اليوم الحالي
+                # التقاط الفرصة المفتوحة في شمعة اليوم الحالي
                 elif i == len(df) - 1:
                     current_price = closes[i]
                     current_return = ((current_price - entry_day_close) / entry_day_close) * 100
@@ -289,7 +289,8 @@ def process_stock(ticker, start_dt, end_dt):
 
 
 def single_pass_backtest():
-    end_date = datetime.now() + timedelta(days=1)
+    # [تعديل 2]: رفع مدى end_date إلى +5 أيام لضمان تضمين شمعة اليوم فور إغلاق الجلسة
+    end_date = datetime.now() + timedelta(days=5)
     start_date = datetime.now() - timedelta(days=10 * 365)
 
     start_str = start_date.strftime('%Y-%m-%d')
@@ -358,7 +359,6 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
     if confirmed_trades:
         msg = f"🚀 نتائج فحص البورصة المصرية{header_date}:\n\n"
         
-        # إنشاء بصمة فريدة للتقرير معتمدة على التاريخ والأسهم المقبولة
         raw_fingerprint = f"{detected_data_date}_"
         sorted_trades = sorted(confirmed_trades, key=lambda x: x['Ticker'])
         
