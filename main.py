@@ -1,4 +1,3 @@
-import hashlib
 import os
 import sys
 import time
@@ -83,8 +82,8 @@ class SuppressStdOut:
         sys.stderr = self._original_stderr
 
 
-def get_last_sent_hash():
-    """قراءة بصمة آخر تقرير تم إرساله والمحفوظة في ملف الكاش"""
+def get_last_sent_from_file():
+    """قراءة آخر رسالة تم إرسالها والمحفوظة في ملف الكاش"""
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, "r", encoding="utf-8") as f:
@@ -94,24 +93,24 @@ def get_last_sent_hash():
     return ""
 
 
-def save_last_sent_hash(msg_hash):
-    """حفظ بصمة التقرير الجديد في ملف الكاش"""
+def save_last_sent_to_file(message):
+    """حفظ الرسالة الجديدة في ملف الكاش"""
     try:
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            f.write(msg_hash.strip())
+            f.write(message.strip())
     except Exception as e:
         print(f"⚠️ خطأ في حفظ ملف الكاش: {e}")
 
 
-def send_telegram_notification(message, msg_hash):
+def send_telegram_notification(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print('⚠️ لم يتم العثور على بيانات TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID.')
         return
 
-    # --- فحص التكرار باستخدام البصمة (Hash) ---
-    last_hash = get_last_sent_hash()
-    if last_hash and last_hash == msg_hash:
-        print("⏸️ التقرير مطابق تماماً لآخر تقرير تم إرساله بنفس بيانات الجلسة. تم إلغاء الإرسال وتجنب التكرار.")
+    # --- فحص التكرار من الكاش المحلي ---
+    last_msg = get_last_sent_from_file()
+    if last_msg and last_msg == message.strip():
+        print("⏸️ الرسالة مطابقة تماماً لآخر رسالة تم إرسالها. تم إلغاء الإرسال وتجنب التكرار.")
         return
 
     chat_ids = [c.strip() for c in TELEGRAM_CHAT_ID.split(",") if c.strip()]
@@ -130,9 +129,9 @@ def send_telegram_notification(message, msg_hash):
         except Exception as e:
             print(f'❌ خطأ إتصال أثناء الإرسال لـ ({chat_id}): {e}')
 
-    # حفظ بصمة الرسالة فقط عند نجاح الإرسال
+    # حفظ الرسالة فقط في حالة نجاح الإرسال
     if sent_success:
-        save_last_sent_hash(msg_hash)
+        save_last_sent_to_file(message)
 
 
 def find_steel_supports_optimized(df):
@@ -185,7 +184,6 @@ def process_stock(ticker, start_dt, end_dt):
     trades = []
     try:
         with SuppressStdOut():
-            # [تعديل 1]: إضافة ignore_tz=True لضمان السحب السليم بالتوقيت المحلي
             df = yf.download(
                 ticker,
                 start=start_dt,
@@ -193,7 +191,6 @@ def process_stock(ticker, start_dt, end_dt):
                 interval='1d',
                 progress=False,
                 auto_adjust=True,
-                ignore_tz=True,
             )
 
         if df.empty or len(df) < 50:
@@ -203,21 +200,19 @@ def process_stock(ticker, start_dt, end_dt):
             df.columns = df.columns.get_level_values(0)
 
         df.columns = [c.lower() for c in df.columns]
-        
-        # إجبار الترتيب التصاعدي
-        df = df.sort_index(ascending=True)
         df.index = pd.to_datetime(df.index).date
 
-        # تاريخ آخر جلسة موجودة بالفضاء
+        # معرفة تاريخ اليوم الأخير من البيانات المسحوبة
         last_data_date = df.index[-1]
 
         df['segment'] = 0
 
-        lows = df['low'].values
-        highs = df['high'].values
-        closes = df['close'].values
-        opens = df['open'].values
-        segments = df['segment'].values
+        lows, highs, closes, opens = (
+            df['low'].values,
+            df['high'].values,
+            df['close'].values,
+            df['open'].values,
+        )
         dates = df.index
 
         all_steel_levels = find_steel_supports_optimized(df)
@@ -226,14 +221,14 @@ def process_stock(ticker, start_dt, end_dt):
         entry_p, entry_d, entry_day_close = 0, None, 0
         cooldown_until_idx = -1
 
-        for i in range(50, len(df)):
+        for i in range(20, len(df)):
             if not in_pos:
                 if i < cooldown_until_idx:
                     continue
 
                 available_supports = [
                     l for l in all_steel_levels
-                    if l['active_from_idx'] <= i and l['segment'] == segments[i]
+                    if l['active_from_idx'] <= i and l['segment'] == df['segment'].iloc[i]
                 ]
 
                 for support in available_supports:
@@ -246,7 +241,7 @@ def process_stock(ticker, start_dt, end_dt):
                     opened_above = opens[i] >= lower_bound
 
                     if was_above and opened_above:
-                        if upper_bound >= lows[i] >= lower_bound:
+                        if lows[i] <= upper_bound and lows[i] >= lower_bound:
                             if (closes[i] - lvl) / lvl > MAX_ENTRY_SLIPPAGE:
                                 continue
 
@@ -265,7 +260,6 @@ def process_stock(ticker, start_dt, end_dt):
                 elif highs[i] >= target:
                     in_pos, cooldown_until_idx = False, i + 14
 
-                # التقاط الفرصة المفتوحة في شمعة اليوم الحالي
                 elif i == len(df) - 1:
                     current_price = closes[i]
                     current_return = ((current_price - entry_day_close) / entry_day_close) * 100
@@ -289,8 +283,7 @@ def process_stock(ticker, start_dt, end_dt):
 
 
 def single_pass_backtest():
-    # [تعديل 2]: رفع مدى end_date إلى +5 أيام لضمان تضمين شمعة اليوم فور إغلاق الجلسة
-    end_date = datetime.now() + timedelta(days=5)
+    end_date = datetime.now() + timedelta(days=1)
     start_date = datetime.now() - timedelta(days=10 * 365)
 
     start_str = start_date.strftime('%Y-%m-%d')
@@ -343,7 +336,7 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
             latest_trade_info[t] = trade
 
         ticker_counts.update(found_tickers)
-        print(f"    ✓ تم العثور على {len(found_tickers)} صفقة في هذه الدورة (جلسة: {detected_data_date}).")
+        print(f"   ✓ تم العثور على {len(found_tickers)} صفقة في هذه الدورة (جلسة: {detected_data_date}).")
 
         if check_num < total_checks and delay_between_checks > 0:
             time.sleep(delay_between_checks)
@@ -358,11 +351,7 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
 
     if confirmed_trades:
         msg = f"🚀 نتائج فحص البورصة المصرية{header_date}:\n\n"
-        
-        raw_fingerprint = f"{detected_data_date}_"
-        sorted_trades = sorted(confirmed_trades, key=lambda x: x['Ticker'])
-        
-        for row in sorted_trades:
+        for row in confirmed_trades:
             return_str = (
                 f"{row['Return']:.2f}%"
                 if row['Return'] < 0
@@ -378,18 +367,12 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
             msg += f"🎯 الهدف : {row['Target_Price']}\n"
             msg += f"🛑 وقف الخسارة : {row['Stop_Price']}\n"
             msg += '=============\n'
-
-            raw_fingerprint += f"{row['Ticker']}_{row['Entry_Date']}_{row['Current_Price']}|"
-
-        msg_hash = hashlib.md5(raw_fingerprint.encode('utf-8')).hexdigest()
         print("\n" + msg)
-        send_telegram_notification(msg, msg_hash)
-
     else:
         msg = f"⚠️ تقرير الفحص اليومي{header_date}:\nتم فحص جميع الأسهم بنجاح، ولا توجد فرص تنطبق عليها الشروط حالياً."
-        msg_hash = hashlib.md5(f"NO_TRADES_{detected_data_date}".encode('utf-8')).hexdigest()
         print("\n" + msg)
-        send_telegram_notification(msg, msg_hash)
+
+    send_telegram_notification(msg)
 
 
 if __name__ == '__main__':
