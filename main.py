@@ -1,3 +1,4 @@
+import hashlib
 import os
 import sys
 import time
@@ -82,8 +83,8 @@ class SuppressStdOut:
         sys.stderr = self._original_stderr
 
 
-def get_last_sent_from_file():
-    """قراءة آخر رسالة تم إرسالها والمحفوظة في ملف الكاش"""
+def get_last_sent_hash():
+    """قراءة بصمة آخر تقرير تم إرساله والمحفوظة في ملف الكاش"""
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, "r", encoding="utf-8") as f:
@@ -93,24 +94,24 @@ def get_last_sent_from_file():
     return ""
 
 
-def save_last_sent_to_file(message):
-    """حفظ الرسالة الجديدة في ملف الكاش"""
+def save_last_sent_hash(msg_hash):
+    """حفظ بصمة التقرير الجديد في ملف الكاش"""
     try:
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            f.write(message.strip())
+            f.write(msg_hash.strip())
     except Exception as e:
         print(f"⚠️ خطأ في حفظ ملف الكاش: {e}")
 
 
-def send_telegram_notification(message):
+def send_telegram_notification(message, msg_hash):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print('⚠️ لم يتم العثور على بيانات TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID.')
         return
 
-    # --- فحص التكرار من الكاش المحلي ---
-    last_msg = get_last_sent_from_file()
-    if last_msg and last_msg == message.strip():
-        print("⏸️ الرسالة مطابقة تماماً لآخر رسالة تم إرسالها. تم إلغاء الإرسال وتجنب التكرار.")
+    # --- فحص التكرار باستخدام البصمة (Hash) ---
+    last_hash = get_last_sent_hash()
+    if last_hash and last_hash == msg_hash:
+        print("⏸️ التقرير مطابق تماماً لآخر تقرير تم إرساله بنفس بيانات الجلسة. تم إلغاء الإرسال وتجنب التكرار.")
         return
 
     chat_ids = [c.strip() for c in TELEGRAM_CHAT_ID.split(",") if c.strip()]
@@ -129,9 +130,9 @@ def send_telegram_notification(message):
         except Exception as e:
             print(f'❌ خطأ إتصال أثناء الإرسال لـ ({chat_id}): {e}')
 
-    # حفظ الرسالة فقط في حالة نجاح الإرسال
+    # حفظ بصمة الرسالة فقط عند نجاح الإرسال
     if sent_success:
-        save_last_sent_to_file(message)
+        save_last_sent_hash(msg_hash)
 
 
 def find_steel_supports_optimized(df):
@@ -325,7 +326,7 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
     for check_num in range(1, total_checks + 1):
         print(f"🔄 [دورة {check_num}/{total_checks}] جاري سحب البيانات واستخراج الفرص...")
         trades, data_date_str = single_pass_backtest()
-        
+
         if data_date_str:
             detected_data_date = data_date_str
 
@@ -336,7 +337,7 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
             latest_trade_info[t] = trade
 
         ticker_counts.update(found_tickers)
-        print(f"   ✓ تم العثور على {len(found_tickers)} صفقة في هذه الدورة (جلسة: {detected_data_date}).")
+        print(f"    ✓ تم العثور على {len(found_tickers)} صفقة في هذه الدورة (جلسة: {detected_data_date}).")
 
         if check_num < total_checks and delay_between_checks > 0:
             time.sleep(delay_between_checks)
@@ -351,7 +352,14 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
 
     if confirmed_trades:
         msg = f"🚀 نتائج فحص البورصة المصرية{header_date}:\n\n"
-        for row in confirmed_trades:
+        
+        # إنشاء معرف فريد للتقرير بناءً على الجلسة والأسهم وتواريخ دخولها وأسعارها
+        raw_fingerprint = f"{detected_data_date}_"
+        
+        # ترتيب الصفقات حسب الأبجدية لضمان تطابق الترتيب للبصمة
+        sorted_trades = sorted(confirmed_trades, key=lambda x: x['Ticker'])
+        
+        for row in sorted_trades:
             return_str = (
                 f"{row['Return']:.2f}%"
                 if row['Return'] < 0
@@ -367,12 +375,18 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
             msg += f"🎯 الهدف : {row['Target_Price']}\n"
             msg += f"🛑 وقف الخسارة : {row['Stop_Price']}\n"
             msg += '=============\n'
+
+            raw_fingerprint += f"{row['Ticker']}_{row['Entry_Date']}_{row['Current_Price']}|"
+
+        msg_hash = hashlib.md5(raw_fingerprint.encode('utf-8')).hexdigest()
         print("\n" + msg)
+        send_telegram_notification(msg, msg_hash)
+
     else:
         msg = f"⚠️ تقرير الفحص اليومي{header_date}:\nتم فحص جميع الأسهم بنجاح، ولا توجد فرص تنطبق عليها الشروط حالياً."
+        msg_hash = hashlib.md5(f"NO_TRADES_{detected_data_date}".encode('utf-8')).hexdigest()
         print("\n" + msg)
-
-    send_telegram_notification(msg)
+        send_telegram_notification(msg, msg_hash)
 
 
 if __name__ == '__main__':
