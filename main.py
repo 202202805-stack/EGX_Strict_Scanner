@@ -201,6 +201,9 @@ def process_stock(ticker, start_dt, end_dt):
             df.columns = df.columns.get_level_values(0)
 
         df.columns = [c.lower() for c in df.columns]
+        
+        # ثغرة 1: الترتيب التصاعدي المؤكد
+        df = df.sort_index(ascending=True)
         df.index = pd.to_datetime(df.index).date
 
         # معرفة تاريخ اليوم الأخير من البيانات المسحوبة
@@ -208,12 +211,11 @@ def process_stock(ticker, start_dt, end_dt):
 
         df['segment'] = 0
 
-        lows, highs, closes, opens = (
-            df['low'].values,
-            df['high'].values,
-            df['close'].values,
-            df['open'].values,
-        )
+        lows = df['low'].values
+        highs = df['high'].values
+        closes = df['close'].values
+        opens = df['open'].values
+        segments = df['segment'].values
         dates = df.index
 
         all_steel_levels = find_steel_supports_optimized(df)
@@ -222,14 +224,16 @@ def process_stock(ticker, start_dt, end_dt):
         entry_p, entry_d, entry_day_close = 0, None, 0
         cooldown_until_idx = -1
 
-        for i in range(20, len(df)):
+        # ثغرة 2: رفع حد البداية لضمان كفاية البيانات للحساب الفني
+        for i in range(50, len(df)):
             if not in_pos:
                 if i < cooldown_until_idx:
                     continue
 
+                # ثغرة 3: توحيد المصفوفتين لـ Numpy لتسريع الأداء وتجنب خطأ التراصف
                 available_supports = [
                     l for l in all_steel_levels
-                    if l['active_from_idx'] <= i and l['segment'] == df['segment'].iloc[i]
+                    if l['active_from_idx'] <= i and l['segment'] == segments[i]
                 ]
 
                 for support in available_supports:
@@ -242,7 +246,7 @@ def process_stock(ticker, start_dt, end_dt):
                     opened_above = opens[i] >= lower_bound
 
                     if was_above and opened_above:
-                        if lows[i] <= upper_bound and lows[i] >= lower_bound:
+                        if upper_bound >= lows[i] >= lower_bound:
                             if (closes[i] - lvl) / lvl > MAX_ENTRY_SLIPPAGE:
                                 continue
 
@@ -261,6 +265,7 @@ def process_stock(ticker, start_dt, end_dt):
                 elif highs[i] >= target:
                     in_pos, cooldown_until_idx = False, i + 14
 
+                # ثغرة 4: التقاط الصفقة إذا كانت ما زالت مفتوحة في اليوم الحالي
                 elif i == len(df) - 1:
                     current_price = closes[i]
                     current_return = ((current_price - entry_day_close) / entry_day_close) * 100
@@ -353,10 +358,8 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
     if confirmed_trades:
         msg = f"🚀 نتائج فحص البورصة المصرية{header_date}:\n\n"
         
-        # إنشاء معرف فريد للتقرير بناءً على الجلسة والأسهم وتواريخ دخولها وأسعارها
+        # إنشاء بصمة فريدة للتقرير معتمدة على التاريخ والأسهم المقبولة
         raw_fingerprint = f"{detected_data_date}_"
-        
-        # ترتيب الصفقات حسب الأبجدية لضمان تطابق الترتيب للبصمة
         sorted_trades = sorted(confirmed_trades, key=lambda x: x['Ticker'])
         
         for row in sorted_trades:
