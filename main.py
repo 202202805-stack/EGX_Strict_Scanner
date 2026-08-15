@@ -25,7 +25,7 @@ MIN_DAYS_GAP = 20
 REJECTION_POWER = 0.16
 TARGET_PROFIT = 0.05
 STOP_LOSS = 0.04
-MAX_ENTRY_SLIPPAGE = 0.015
+MAX_ENTRY_SLIPPAGE = 0.013
 SLIPPAGE_COOLDOWN_DAYS = 3
 MAX_SUPPORT_AGE_BARS = 252 * 3
 
@@ -240,7 +240,7 @@ def find_steel_supports_optimized(df):
 
 
 # ---------------------------------------------------------
-# 3. معالجة السهم بعد الدمج بين المصدرين
+# 3. معالجة السهم بعد الدمج وإكمال الأيام المفقودة
 # ---------------------------------------------------------
 def process_stock(ticker, start_dt, end_dt, tv_today_data):
     trades = []
@@ -266,29 +266,26 @@ def process_stock(ticker, start_dt, end_dt, tv_today_data):
         df.columns = [c.lower() for c in df.columns]
         df.index = pd.to_datetime(df.index).date
 
-        # دمج بيانات اليوم اللحظية من TradingView إذا توفرت
+        # دمج بيانات اليوم اللحظية وإكمال الأيام المفقودة إن وجدت
         if ticker in tv_today_data:
             tv_row = tv_today_data[ticker]
             tv_date = tv_row["Date"]
 
-            if tv_date not in df.index:
-                df_tv = pd.DataFrame(
-                    [{
-                        "open": tv_row["open"],
-                        "high": tv_row["high"],
-                        "low": tv_row["low"],
-                        "close": tv_row["close"],
-                    }],
-                    index=[tv_date],
-                )
-                df = pd.concat([df, df_tv])
-            else:
-                df.loc[tv_date, ["open", "high", "low", "close"]] = [
-                    tv_row["open"],
-                    tv_row["high"],
-                    tv_row["low"],
-                    tv_row["close"],
-                ]
+            # 1. تحديث أو دمج شمعة اليوم الحالية
+            df.loc[tv_date, ["open", "high", "low", "close"]] = [
+                tv_row["open"],
+                tv_row["high"],
+                tv_row["low"],
+                tv_row["close"],
+            ]
+
+            # 2. ترتيب المؤشر ومنع تكرار السجلات
+            df = df[~df.index.duplicated(keep="last")].sort_index()
+
+            # 3. تعبئة وإكمال أي فجوات زمنية أو أيام ناقصة بين أحدث بيانات yFinance وتاريخ TradingView
+            full_idx = pd.date_range(start=df.index.min(), end=df.index.max(), freq="B").date
+            df = df.reindex(full_idx)
+            df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].ffill()
 
         df = df[~df.index.duplicated(keep="last")].sort_index()
 
