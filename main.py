@@ -7,6 +7,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 import numpy as np
+import openpyxl
 import pandas as pd
 import requests
 import yfinance as yf
@@ -26,8 +27,6 @@ REJECTION_POWER = 0.16
 TARGET_PROFIT = 0.05
 STOP_LOSS = 0.04
 MAX_ENTRY_SLIPPAGE = 0.013
-SLIPPAGE_COOLDOWN_DAYS = 3
-MAX_SUPPORT_AGE_BARS = 252 * 3
 
 # قاموس ترجمة أسماء الأيام للعربية
 DAYS_ARABIC = {
@@ -40,7 +39,7 @@ DAYS_ARABIC = {
     "Friday": "الجمعة",
 }
 
-# 🚨 قائمة الأسهم المصرية المحددة حصراً 🚨
+# 🚨 قائمة الأسهم المصرية المعتمدة حصراً 🚨
 egyptian_stocks = [
     "AALR.CA", "ABUK.CA", "ACAMD.CA", "ACAP.CA", "ACGC.CA", "ACTF.CA", "ADCI.CA", "ADIB.CA",
     "ADPC.CA", "ADRI.CA", "AFDI.CA", "AFMC.CA", "AIDC.CA", "AIFI.CA", "AIH.CA", "AJWA.CA",
@@ -138,53 +137,74 @@ def send_telegram_notification(message):
 
 
 # ---------------------------------------------------------
-# 1. جلب البيانات اللحظية لليوم الحالي من TradingView
+# 1. سحب بيانات أحدث 7 جلسات تداول من TradingView
 # ---------------------------------------------------------
-def fetch_tradingview_today_data(allowed_tickers):
-    """سحب بيانات أسعار اليوم اللحظية المباشرة من TradingView للأسهم المحددة فقط."""
+def get_recent_trading_days(n=7):
+    """توليد تواريخ أحدث N أيام تداول للبورصة المصرية (باستثناء الجمعة والسبت)"""
+    days = []
+    curr = datetime.now().date()
+    while len(days) < n:
+        if curr.weekday() not in [4, 5]:  # 4 = الجمعة, 5 = السبت
+            days.append(curr)
+        curr -= timedelta(days=1)
+    return days
+
+
+def get_tradingview_last_7_sessions():
+    """سحب أحدث 7 جلسات تداول من TradingView لجميع الأسهم"""
     url = "https://scanner.tradingview.com/egypt/scan"
+
+    columns = ["name"]
+    for i in range(7):
+        suffix = f"|{i}" if i > 0 else ""
+        columns.extend([f"open{suffix}", f"high{suffix}", f"low{suffix}", f"close{suffix}"])
+
     payload = {
         "filter": [{"left": "name", "operation": "nempty"}],
         "options": {"active_symbols_only": True},
-        "columns": ["name", "description", "open", "high", "low", "close"],
-        "sort": {"sortBy": "name", "sortOrder": "asc"},
-        "range": [0, 500],
+        "columns": columns,
+        "range": [0, 300],
     }
     headers = {"User-Agent": "Mozilla/5.0"}
 
-    tv_data = {}
-    try:
-        res = requests.post(url, json=payload, headers=headers, timeout=10)
-        data = res.json().get("data", [])
+    recent_dates = get_recent_trading_days(7)
+    tv_data_dict = {}
 
-        today_date = datetime.now().date()
-        allowed_set = set(allowed_tickers)
+    try:
+        res = requests.post(url, json=payload, headers=headers, timeout=12)
+        data = res.json().get("data", [])
 
         for item in data:
             sym = item["s"].replace("EGX:", "")
             ticker_ca = f"{sym}.CA"
-
-            if ticker_ca not in allowed_set:
-                continue
-
             d = item["d"]
-            open_p = d[2] if d[2] is not None else 0
-            high_p = d[3] if d[3] is not None else open_p
-            low_p = d[4] if d[4] is not None else open_p
-            close_p = d[5] if d[5] is not None else open_p
 
-            if close_p > 0:
-                tv_data[ticker_ca] = {
-                    "Date": today_date,
-                    "open": round(float(open_p), 3),
-                    "high": round(float(high_p), 3),
-                    "low": round(float(low_p), 3),
-                    "close": round(float(close_p), 3),
-                }
-    except Exception as e:
-        print(f"⚠️ تعذر سحب بيانات TradingView: {e}")
+            bars = []
+            col_idx = 1
+            for i in range(7):
+                o = d[col_idx]
+                h = d[col_idx + 1]
+                l = d[col_idx + 2]
+                c = d[col_idx + 3]
+                col_idx += 4
 
-    return tv_data
+                if None not in (o, h, l, c) and c > 0:
+                    bars.append({
+                        "date": recent_dates[i],
+                        "open": float(o),
+                        "high": float(h),
+                        "low": float(l),
+                        "close": float(c),
+                    })
+
+            if bars:
+                df_tv = pd.DataFrame(bars).set_index("date").sort_index()
+                tv_data_dict[ticker_ca] = df_tv
+
+    except Exception:
+        pass
+
+    return tv_data_dict
 
 
 # ---------------------------------------------------------
@@ -216,8 +236,8 @@ def find_steel_supports_optimized(df):
             if price_diff <= SENSITIVITY and time_diff >= MIN_DAYS_GAP:
                 inter_opens = opens[p1["index"] + 1 : p2["index"]]
                 inter_closes = closes[p1["index"] + 1 : p2["index"]]
-                inter_bodies_low = np.minimum(inter_opens, inter_closes)
 
+                inter_bodies_low = np.minimum(inter_opens, inter_closes)
                 support_level = p1["price"]
 
                 if len(inter_bodies_low) > 0 and np.any(inter_bodies_low < support_level):
@@ -231,18 +251,15 @@ def find_steel_supports_optimized(df):
                         "price": p2["price"],
                         "active_from_idx": p2["index"],
                         "segment": p2["segment"],
-                        "touches": 2,
-                        "last_pivot_idx": p2["index"],
-                        "rejection_power": rejection,
                     })
                     break
     return steel_levels
 
 
 # ---------------------------------------------------------
-# 3. معالجة السهم بعد الدمج وإكمال الأيام المفقودة
+# 3. معالجة السهم وسد نقص البيانات مع TradingView
 # ---------------------------------------------------------
-def process_stock(ticker, start_dt, end_dt, tv_today_data):
+def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
     trades = []
     try:
         with SuppressStdOut():
@@ -266,30 +283,16 @@ def process_stock(ticker, start_dt, end_dt, tv_today_data):
         df.columns = [c.lower() for c in df.columns]
         df.index = pd.to_datetime(df.index).date
 
-        # دمج بيانات اليوم اللحظية وإكمال الأيام المفقودة إن وجدت
-        if ticker in tv_today_data:
-            tv_row = tv_today_data[ticker]
-            tv_date = tv_row["Date"]
+        # --- سد نقص بيانات yfinance باستخدام أحدث 7 جلسات من TradingView ---
+        if tv_df_7days is not None and not tv_df_7days.empty:
+            last_yf_date = df.index[-1]
+            missing_sessions = tv_df_7days[tv_df_7days.index > last_yf_date]
 
-            # 1. تحديث أو دمج شمعة اليوم الحالية
-            df.loc[tv_date, ["open", "high", "low", "close"]] = [
-                tv_row["open"],
-                tv_row["high"],
-                tv_row["low"],
-                tv_row["close"],
-            ]
+            if not missing_sessions.empty:
+                df = pd.concat([df, missing_sessions])
+                df = df[~df.index.duplicated(keep="last")].sort_index()
 
-            # 2. ترتيب المؤشر ومنع تكرار السجلات
-            df = df[~df.index.duplicated(keep="last")].sort_index()
-
-            # 3. تعبئة وإكمال أي فجوات زمنية أو أيام ناقصة بين أحدث بيانات yFinance وتاريخ TradingView
-            full_idx = pd.date_range(start=df.index.min(), end=df.index.max(), freq="B").date
-            df = df.reindex(full_idx)
-            df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].ffill()
-
-        df = df[~df.index.duplicated(keep="last")].sort_index()
-
-        # حساب شريحة التجزئة (Segments)
+        # حساب شرائح التجزئة (Segments)
         df["segment"] = 0
         if not splits.empty:
             split_dates = pd.to_datetime(splits.index).date
@@ -309,7 +312,7 @@ def process_stock(ticker, start_dt, end_dt, tv_today_data):
         all_steel_levels = find_steel_supports_optimized(df)
 
         in_pos = False
-        entry_p, entry_d, entry_day_close, entry_idx = 0, None, 0, -1
+        entry_p, entry_d, entry_day_close = 0, None, 0
         cooldown_until_idx = -1
 
         for i in range(20, len(df)):
@@ -321,31 +324,11 @@ def process_stock(ticker, start_dt, end_dt, tv_today_data):
                     l
                     for l in all_steel_levels
                     if l["active_from_idx"] <= i
-                    and (i - l["active_from_idx"]) <= MAX_SUPPORT_AGE_BARS
                     and l["segment"] == df["segment"].iloc[i]
                 ]
 
-                available_supports = sorted(
-                    available_supports,
-                    key=lambda x: (
-                        x.get("touches", 1),
-                        x.get("last_pivot_idx", 0),
-                        x.get("rejection_power", 0),
-                    ),
-                    reverse=True,
-                )
-
-                valid_matching_supports = []
-
                 for support in available_supports:
                     lvl = support["price"]
-                    p2_idx = support["active_from_idx"]
-
-                    if i > p2_idx + 1:
-                        post_closes = closes[p2_idx + 1 : i]
-                        if np.any(post_closes < lvl):
-                            continue
-
                     upper_bound = lvl * 1.01
                     lower_bound = lvl * 0.99
 
@@ -355,44 +338,20 @@ def process_stock(ticker, start_dt, end_dt, tv_today_data):
 
                     if was_above and opened_above:
                         if lows[i] <= upper_bound and lows[i] >= lower_bound:
-                            if (closes[i] - lvl) / lvl <= MAX_ENTRY_SLIPPAGE:
-                                valid_matching_supports.append(support)
-                            else:
-                                cooldown_until_idx = i + SLIPPAGE_COOLDOWN_DAYS
+                            if (closes[i] - lvl) / lvl > MAX_ENTRY_SLIPPAGE:
+                                continue
 
-                if valid_matching_supports:
-                    selected_support = valid_matching_supports[0]
-                    entry_p = selected_support["price"]
-                    entry_d = dates[i]
-                    entry_day_close = closes[i]
-                    entry_idx = i
-                    in_pos = True
+                            entry_p = lvl
+                            entry_d = dates[i]
+                            entry_day_close = closes[i]
+                            in_pos = True
+                            break
 
             else:
-                if i == entry_idx:
-                    continue
-
                 target = entry_day_close * (1 + TARGET_PROFIT)
-                stop = entry_day_close * (1 - STOP_LOSS)
+                stop = entry_p * (1 - STOP_LOSS)
 
-                hit_target = highs[i] >= target
-                hit_stop = lows[i] <= stop
-
-                if hit_target and hit_stop:
-                    trades.append({
-                        "Ticker": ticker,
-                        "Status": "Loss ❌ (Same Day Conflict)",
-                        "Entry Price": round(entry_p, 3),
-                        "Entry Day Close": round(entry_day_close, 3),
-                        "Exit Price": round(stop, 3),
-                        "Return": f"-{STOP_LOSS*100}%",
-                        "Entry Date": entry_d,
-                        "Exit Date": dates[i],
-                        "Days Held": (dates[i] - entry_d).days,
-                    })
-                    in_pos, cooldown_until_idx = False, i + 1
-
-                elif hit_target:
+                if highs[i] >= target:
                     trades.append({
                         "Ticker": ticker,
                         "Status": "Win ✅",
@@ -406,7 +365,7 @@ def process_stock(ticker, start_dt, end_dt, tv_today_data):
                     })
                     in_pos, cooldown_until_idx = False, i + 14
 
-                elif hit_stop:
+                elif lows[i] <= stop:
                     trades.append({
                         "Ticker": ticker,
                         "Status": "Loss ❌",
@@ -445,13 +404,13 @@ def process_stock(ticker, start_dt, end_dt, tv_today_data):
 # 4. دورة مسح واحدة واستخراج الفرص النشطة
 # ---------------------------------------------------------
 def single_pass_backtest():
-    end_date = datetime.now() + timedelta(days=1)
-    start_date = datetime.now() - timedelta(days=10 * 365)
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=10 * 365)
 
     start_str = start_date.strftime("%Y-%m-%d")
     end_str = end_date.strftime("%Y-%m-%d")
 
-    tv_today_data = fetch_tradingview_today_data(egyptian_stocks)
+    tv_7days_data = get_tradingview_last_7_sessions()
 
     open_trades = []
     latest_dates = []
@@ -459,7 +418,7 @@ def single_pass_backtest():
     with ProcessPoolExecutor() as executor:
         futures = {
             executor.submit(
-                process_stock, ticker, start_str, end_str, tv_today_data
+                process_stock, ticker, start_str, end_str, tv_7days_data.get(ticker)
             ): ticker
             for ticker in egyptian_stocks
         }
@@ -488,7 +447,9 @@ def single_pass_backtest():
 # 5. الفحص الهجين المركب مع الإرسال عبر التلجرام
 # ---------------------------------------------------------
 def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=10):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 بدء الفحص الهجين المركب (Yahoo + TradingView - {total_checks} دورات)...")
+    print(
+        f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 بدء الفحص الهجين المركب (Yahoo + TradingView - {total_checks} دورات)..."
+    )
 
     ticker_counts = Counter()
     latest_trade_info = {}
@@ -508,7 +469,9 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
             latest_trade_info[t] = trade
 
         ticker_counts.update(found_tickers)
-        print(f"   ✓ تم العثور على {len(found_tickers)} صفقة مفتوحة في هذه الدورة (جلسة: {detected_data_date}).")
+        print(
+            f"   ✓ تم العثور على {len(found_tickers)} صفقة مفتوحة في هذه الدورة (جلسة: {detected_data_date})."
+        )
 
         if check_num < total_checks and delay_between_checks > 0:
             time.sleep(delay_between_checks)
@@ -530,7 +493,7 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
             ret_val = row.get("Return", "0%")
 
             target_p = round(entry_close * (1 + TARGET_PROFIT), 3)
-            stop_p = round(entry_close * (1 - STOP_LOSS), 3)
+            stop_p = round(entry_p * (1 - STOP_LOSS), 3)
 
             msg += f"📈 السهم: {row['Ticker']}\n"
             msg += f"📅 تاريخ الدخول: {row.get('Entry Date', '')}\n"
