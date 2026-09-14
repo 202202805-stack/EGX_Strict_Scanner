@@ -1,443 +1,45 @@
-import datetime
-import math
 import os
+import sys
+import time
 import warnings
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from collections import Counter
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from datetime import datetime, timedelta
 
 import numpy as np
 import openpyxl
 import pandas as pd
 import requests
 import yfinance as yf
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from scipy.signal import argrelextrema
 
-warnings.filterwarnings('ignore')
-
-try:
-    from google.colab import files
-    COLAB_ENV = True
-except ImportError:
-    COLAB_ENV = False
-
-
-# ==============================================================================
-# 1. TRADINGVIEW INTEGRATION FOR LIVE DATA
-# ==============================================================================
-
-def fetch_tradingview_live_data(tickers: List[str]) -> dict:
-    """جلب الأسعار اللحظية لأهم أسهم البورصة المصرية عبر سكريبر TradingView"""
-    tv_data = {}
-    symbols = [f"EGX:{ticker.replace('.CA', '')}" for ticker in tickers]
-    
-    url = "https://scanner.tradingview.com/egypt/scan"
-    payload = {
-        "symbols": {"tickers": symbols},
-        "columns": ["name", "open", "high", "low", "close", "volume"]
-    }
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
-
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
-        if response.status_code == 200:
-            res_json = response.json()
-            for item in res_json.get("data", []):
-                raw_ticker = item.get("s", "")
-                ticker = raw_ticker.replace("EGX:", "") + ".CA"
-                vals = item.get("d", [])
-                if len(vals) >= 6 and vals[1] is not None:
-                    tv_data[ticker] = {
-                        "Open": float(vals[1]),
-                        "High": float(vals[2]),
-                        "Low": float(vals[3]),
-                        "Close": float(vals[4]),
-                        "Volume": float(vals[5]) if vals[5] is not None else 0.0
-                    }
-    except Exception as e:
-        print(f"    [TV Warning] Could not fetch live data from TradingView: {e}")
-
-    return tv_data
-
-
-def get_combined_stock_data(ticker: str, start_date: datetime.datetime, end_date: datetime.datetime, tv_live_dict: dict) -> pd.DataFrame:
-    """تحميل بيانات Yahoo Finance ودمج آخر سعر لحظي من TradingView"""
-    df = yf.download(
-        ticker,
-        start=start_date.strftime('%Y-%m-%d'),
-        end=end_date.strftime('%Y-%m-%d'),
-        progress=False
-    )
-
-    if df.empty:
-        return pd.DataFrame()
-
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    df.columns = [c.lower() for c in df.columns]
-
-    if ticker in tv_live_dict:
-        tv_bar = tv_live_dict[ticker]
-        today_date = pd.Timestamp(datetime.datetime.now().date())
-        
-        if df.index[-1].date() < today_date.date():
-            new_row = pd.DataFrame({
-                'open': [tv_bar['Open']],
-                'high': [tv_bar['High']],
-                'low': [tv_bar['Low']],
-                'close': [tv_bar['Close']],
-                'volume': [tv_bar['Volume']]
-            }, index=[today_date])
-            df = pd.concat([df, new_row])
-        else:
-            df.iloc[-1, df.columns.get_loc('high')] = max(df.iloc[-1]['high'], tv_bar['High'])
-            df.iloc[-1, df.columns.get_loc('low')] = min(df.iloc[-1]['low'], tv_bar['Low'])
-            df.iloc[-1, df.columns.get_loc('close')] = tv_bar['Close']
-            df.iloc[-1, df.columns.get_loc('volume')] = max(df.iloc[-1]['volume'], tv_bar['Volume'])
-
-    df.ffill(inplace=True)
-    df.bfill(inplace=True)
-    return df
-
-
-# ==============================================================================
-# 2. DATA CLASSES & BROADENING BOTTOM DETECTOR
-# ==============================================================================
-
-@dataclass
-class SwingPoint:
-    index: int
-    date: pd.Timestamp
-    price: float
-    type: str
-
-@dataclass
-class PerfectBroadeningBottom:
-    start_date: pd.Timestamp
-    entry_date: pd.Timestamp
-    p1: SwingPoint
-    p2: SwingPoint
-    p3: SwingPoint
-    p4: SwingPoint
-    p5: SwingPoint
-    upper_slope: float
-    upper_intercept: float
-    lower_slope: float
-    lower_intercept: float
-    confidence: float
-
-    def upper_value_at(self, x: float) -> float:
-        return self.upper_slope * x + self.upper_intercept
-
-    def lower_value_at(self, x: float) -> float:
-        return self.lower_slope * x + self.lower_intercept
-
-
-class BroadeningBottomDetector:
-    def __init__(self, order: int = 4, max_linearity_error: float = 0.015):
-        self.order = order
-        self.max_linearity_error = max_linearity_error
-
-    def find_swing_points(self, df_window: pd.DataFrame) -> List[SwingPoint]:
-        highs = df_window['high'].values
-        lows = df_window['low'].values
-        dates = df_window.index
-
-        maxima_idx = argrelextrema(highs, np.greater, order=self.order)[0]
-        minima_idx = argrelextrema(lows, np.less, order=self.order)[0]
-
-        swing_points = []
-        for idx in maxima_idx:
-            swing_points.append(SwingPoint(int(idx), dates[idx], float(highs[idx]), 'high'))
-        for idx in minima_idx:
-            swing_points.append(SwingPoint(int(idx), dates[idx], float(lows[idx]), 'low'))
-
-        swing_points.sort(key=lambda x: x.index)
-
-        filtered = []
-        for sp in swing_points:
-            if not filtered or sp.type != filtered[-1].type:
-                filtered.append(sp)
-            elif sp.type == 'high' and sp.price > filtered[-1].price:
-                filtered[-1] = sp
-            elif sp.type == 'low' and sp.price < filtered[-1].price:
-                filtered[-1] = sp
-
-        return filtered
-
-    def detect(self, df_window: pd.DataFrame) -> Optional[PerfectBroadeningBottom]:
-        swings = self.find_swing_points(df_window)
-        
-        if len(swings) < 5:
-            return None
-
-        best_pattern = None
-        best_confidence = 0
-
-        for i in range(len(swings) - 4):
-            p1, p2, p3, p4, p5 = swings[i : i + 5]
-
-            if not (p1.type == 'low' and p2.type == 'high' and p3.type == 'low' and p4.type == 'high' and p5.type == 'low'):
-                continue
-
-            p1_abs_loc = df_window.index.get_loc(p1.date)
-            if p1_abs_loc >= 10:
-                prior_data = df_window.iloc[:p1_abs_loc]
-                prior_slope = np.polyfit(np.arange(len(prior_data)), prior_data['close'].values, 1)[0]
-                if prior_slope >= 0:
-                    continue
-            else:
-                continue
-
-            if not (p5.price < p3.price < p1.price):
-                continue
-            if not (p4.price > p2.price):
-                continue
-
-            lower_slope = (p5.price - p1.price) / (p5.index - p1.index)
-            lower_intercept = p1.price - lower_slope * p1.index
-            
-            expected_p3_price = lower_slope * p3.index + lower_intercept
-            p3_error = abs(p3.price - expected_p3_price) / p3.price
-
-            if p3_error > self.max_linearity_error:
-                continue
-
-            upper_slope = (p4.price - p2.price) / (p4.index - p2.index)
-            upper_intercept = p2.price - upper_slope * p2.index
-
-            if upper_slope <= 0 or lower_slope >= 0:
-                continue
-
-            confidence = 1.0 - (p3_error / self.max_linearity_error)
-
-            if confidence > best_confidence:
-                best_confidence = confidence
-                best_pattern = PerfectBroadeningBottom(
-                    start_date=p1.date,
-                    entry_date=p5.date,
-                    p1=p1, p2=p2, p3=p3, p4=p4, p5=p5,
-                    upper_slope=upper_slope,
-                    upper_intercept=upper_intercept,
-                    lower_slope=lower_slope,
-                    lower_intercept=lower_intercept,
-                    confidence=confidence
-                )
-
-        return best_pattern
-
-
-# ==============================================================================
-# 3. BACKTEST ENGINE WITH REAL OPEN POSITIONS DETECTION & STATUS
-# ==============================================================================
-
-def run_backtest_on_stock(
-    ticker: str,
-    detector: BroadeningBottomDetector,
-    tv_live_dict: dict,
-    years: int = 1,
-    max_holding_bars: int = 40
-) -> List[dict]:
-    trades = []
-    end_date = datetime.datetime.now()
-    start_date = end_date - datetime.timedelta(days=365 * years)
-
-    try:
-        df = get_combined_stock_data(ticker, start_date, end_date, tv_live_dict)
-        if df.empty or len(df) < 50:
-            return trades
-    except Exception:
-        return trades
-
-    latest_close_price = round(float(df['close'].iloc[-1]), 2)
-    window_size = 80
-    step_size = 5
-    i = 0
-    last_p5_date = None
-
-    while i < len(df) - 15:
-        sub_df = df.iloc[i : min(i + window_size, len(df))].copy()
-        if len(sub_df) < 30:
-            break
-
-        pattern = detector.detect(sub_df)
-
-        if pattern and (last_p5_date is None or pattern.p5.date > last_p5_date):
-            last_p5_date = pattern.p5.date
-
-            entry_date = pattern.p5.date
-            entry_idx = df.index.get_loc(entry_date)
-            entry_price = round(float(df['close'].loc[entry_date]), 2)
-            stop_loss = round(float(pattern.p5.price * 0.98), 2)
-
-            future_df = df.iloc[entry_idx + 1 : entry_idx + 1 + max_holding_bars]
-
-            # تقدير مبدئي للهدف Dynamic P6
-            target_p6 = round(float(pattern.upper_value_at(pattern.p5.index + 10)), 2)
-
-            if future_df.empty:
-                # صفقة مفتوحة حديثاً
-                trades.append({
-                    'Stock Name': ticker,
-                    'Entry Date': entry_date.strftime('%Y-%m-%d'),
-                    'Entry Price': entry_price,
-                    'Target': target_p6,
-                    'Stop Loss': stop_loss,
-                    'Exit Date': None,  # يترك فارغاً حقيقياً للصفقة المفتوحة
-                    'Current Price': latest_close_price,
-                    'Status': 'Open'
-                })
-                i += step_size
-                continue
-
-            status = None
-            exit_date = None
-
-            for current_step, (date_idx, row) in enumerate(future_df.iterrows(), start=1):
-                abs_idx = pattern.p5.index + current_step
-                dynamic_target_p6 = pattern.upper_value_at(abs_idx)
-
-                if row['high'] >= dynamic_target_p6:
-                    status = 'Win'
-                    target_p6 = round(float(dynamic_target_p6), 2)
-                    exit_date = date_idx
-                    break
-                elif row['low'] <= stop_loss:
-                    status = 'Loss'
-                    exit_date = date_idx
-                    break
-
-            # معالجة الصفقات المفتوحة والمغلقة:
-            if status is None:
-                if (entry_idx + 1 + len(future_df)) >= len(df):
-                    # الصفقة مستمرة حتى اليوم ولم تكتمل مدتها أو لم تضرب الهدف/الوقف
-                    exit_date_str = None
-                    status_str = 'Open'
-                else:
-                    # اكتملت مدة الاحتفاظ دون ضرب هدف أو وقف حاد
-                    exit_date_str = future_df.index[-1].strftime('%Y-%m-%d')
-                    exit_price = future_df['close'].iloc[-1]
-                    status_str = 'Win' if exit_price >= entry_price else 'Loss'
-            else:
-                exit_date_str = exit_date.strftime('%Y-%m-%d')
-                status_str = status
-
-            trades.append({
-                'Stock Name': ticker,
-                'Entry Date': entry_date.strftime('%Y-%m-%d'),
-                'Entry Price': entry_price,
-                'Target': target_p6,
-                'Stop Loss': stop_loss,
-                'Exit Date': exit_date_str,
-                'Current Price': latest_close_price,
-                'Status': status_str
-            })
-
-            i += window_size // 2
-        else:
-            i += step_size
-
-    return trades
-
-
-# ==============================================================================
-# 4. SINGLE-SHEET EXCEL FORMATTING (8 COLUMNS INCLUDING STATUS)
-# ==============================================================================
-
-def format_excel_file(excel_filename: str):
-    wb = openpyxl.load_workbook(excel_filename)
-    ws = wb.active
-    ws.views.sheetView[0].showGridLines = True
-    ws.views.sheetView[0].rightToLeft = False
-
-    header_fill = PatternFill(start_color="1B365D", end_color="1B365D", fill_type="solid")  # Dark Navy
-    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-
-    data_font = Font(name="Calibri", size=11)
-    thin_border = Border(
-        left=Side(style='thin', color='D9D9D9'),
-        right=Side(style='thin', color='D9D9D9'),
-        top=Side(style='thin', color='D9D9D9'),
-        bottom=Side(style='thin', color='D9D9D9')
-    )
-    align_center = Alignment(horizontal="center", vertical="center")
-
-    ws.row_dimensions[1].height = 24
-    for col in range(1, ws.max_column + 1):
-        cell = ws.cell(row=1, column=col)
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = align_center
-
-    columns = ['Stock Name', 'Entry Date', 'Entry Price', 'Target', 'Stop Loss', 'Exit Date', 'Current Price', 'Status']
-
-    # ألوان خانة الـ Status
-    win_fill = PatternFill(start_color="D4EDDA", end_color="D4EDDA", fill_type="solid")   # أخضر فاتح
-    loss_fill = PatternFill(start_color="F8D7DA", end_color="F8D7DA", fill_type="solid")  # أحمر فاتح
-    open_fill = PatternFill(start_color="FFF3CD", end_color="FFF3CD", fill_type="solid")  # أصفر فاتح
-
-    win_font = Font(name="Calibri", size=11, bold=True, color="155724")
-    loss_font = Font(name="Calibri", size=11, bold=True, color="721C24")
-    open_font = Font(name="Calibri", size=11, bold=True, color="856404")
-
-    for row in range(2, ws.max_row + 1):
-        ws.row_dimensions[row].height = 20
-        for col in range(1, ws.max_column + 1):
-            cell = ws.cell(row=row, column=col)
-            cell.font = data_font
-            cell.border = thin_border
-            cell.alignment = align_center
-
-            col_name = columns[col - 1] if col - 1 < len(columns) else ""
-
-            # تنسيق الأرقام والأسعار
-            if col_name in ['Entry Price', 'Target', 'Stop Loss', 'Current Price']:
-                cell.number_format = '#,##0.00'
-
-            # التنسيق الشرطي لعمود الـ Status
-            if col_name == 'Status':
-                val = str(cell.value).strip() if cell.value else ""
-                if val == 'Win':
-                    cell.fill = win_fill
-                    cell.font = win_font
-                elif val == 'Loss':
-                    cell.fill = loss_fill
-                    cell.font = loss_font
-                elif val == 'Open':
-                    cell.fill = open_fill
-                    cell.font = open_font
-
-    column_widths = {
-        'A': 18,  # Stock Name
-        'B': 16,  # Entry Date
-        'C': 15,  # Entry Price
-        'D': 15,  # Target
-        'E': 15,  # Stop Loss
-        'F': 16,  # Exit Date
-        'G': 16,  # Current Price
-        'H': 14   # Status
-    }
-    for col_letter, width in column_widths.items():
-        ws.column_dimensions[col_letter].width = width
-
-    try:
-        wb.save(excel_filename)
-        print(f"\n========================================================")
-        print(f"📊 EXCEL EXPORT COMPLETED: {excel_filename}")
-        print(f"========================================================")
-    except PermissionError:
-        alt_filename = f"Broadening_Bottoms_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        wb.save(alt_filename)
-        print(f"\n[Permission Error] Main file locked. Saved as: {alt_filename}")
-
-
-# ==============================================================================
-# 5. EXECUTION & MAIN LIST
-# ==============================================================================
-
+warnings.filterwarnings("ignore")
+
+# --- إعدادات التلجرام من متغيرات البيئة ---
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+CACHE_FILE = "last_sent.txt"
+
+# --- الإعدادات الفنية للاستراتيجية ---
+LOOKBACK = 7
+SENSITIVITY = 0.02
+MIN_DAYS_GAP = 20
+REJECTION_POWER = 0.16
+TARGET_PROFIT = 0.05
+STOP_LOSS = 0.04
+MAX_ENTRY_SLIPPAGE = 0.013
+
+# قاموس ترجمة أسماء الأيام للعربية
+DAYS_ARABIC = {
+    "Saturday": "السبت",
+    "Sunday": "الأحد",
+    "Monday": "الإثنين",
+    "Tuesday": "الثلاثاء",
+    "Wednesday": "الأربعاء",
+    "Thursday": "الخميس",
+    "Friday": "الجمعة",
+}
+
+# 🚨 قائمة الأسهم المصرية المعتمدة حصراً 🚨
 egyptian_stocks = [
     "AALR.CA", "ABUK.CA", "ACAMD.CA", "ACAP.CA", "ACGC.CA", "ACTF.CA", "ADCI.CA", "ADIB.CA",
     "ADPC.CA", "ADRI.CA", "AFDI.CA", "AFMC.CA", "AIDC.CA", "AIFI.CA", "AIH.CA", "AJWA.CA",
@@ -458,71 +60,458 @@ egyptian_stocks = [
     "INEG.CA", "INFI.CA", "IRON.CA", "ISMA.CA", "ISMQ.CA", "ISPH.CA", "JUFO.CA", "KABO.CA",
     "KORA.CA", "KRDI.CA", "KWIN.CA", "KZPC.CA", "LCSW.CA", "LKGP.CA", "LUTS.CA", "MAAL.CA",
     "MASR.CA", "MBEG.CA", "MBSC.CA", "MCQE.CA", "MCRO.CA", "MENA.CA", "MEPA.CA", "MFPC.CA",
-    "MFSC.CA", "MHOT.CA", "MILS.CA", "MIPH.CA", "MOED.CA", "MOIL.CA", "MOIN.CA", "MOSC.CA",
-    "MPCI.CA", "MPCO.CA", "MPRC.CA", "MTIE.CA", "NAHO.CA", "NARE.CA", "NCCW.CA", "NCGC.CA",
-    "NEDA.CA", "NHPS.CA", "NINH.CA", "NIPH.CA", "OBRI.CA", "OCAP.CA", "OCDI.CA", "OCPH.CA",
-    "ODIN.CA", "OFH.CA", "OIH.CA", "OLFI.CA", "ORAS.CA", "ORHD.CA", "ORWE.CA", "PHAR.CA",
-    "PHDC.CA", "PHGC.CA", "PHTV.CA", "POUL.CA", "PRCL.CA", "PRDC.CA", "PRMH.CA", "QNBE.CA",
-    "RACC.CA", "RAKT.CA", "RAYA.CA", "RKAZ.CA", "RMDA.CA", "RMTV.CA", "ROTO.CA", "RREI.CA",
-    "RTVC.CA", "RUBX.CA", "SAUD.CA", "SCEM.CA", "SCFM.CA", "SCTS.CA", "SDTI.CA", "SEIG.CA",
-    "SIEG.CA", "SIPC.CA", "SKPC.CA", "SMFR.CA", "SNFC.CA", "SPIN.CA", "SPMD.CA", "SUCE.CA",
-    "SUGR.CA", "SVCE.CA", "SWDY.CA", "TALM.CA", "TANM.CA", "TAQA.CA", "TMGH.CA", "TORA.CA",
-    "TWSA.CA", "TYCN.CA", "UBEE.CA", "UEFM.CA", "UEGC.CA", "UNIP.CA", "UNIT.CA", "UPMS.CA",
-    "UTOP.CA", "VALU.CA", "VERT.CA", "VLMR.CA", "VLMRA.CA", "WCDF.CA", "WKOL.CA", "ZEOT.CA",
-    "ZMID.CA"
+    "MFSC.CA", "MHOT.CA", "MICH.CA", "MILS.CA", "MIPH.CA", "MOED.CA", "MOIL.CA", "MOIN.CA",
+    "MOSC.CA", "MPCI.CA", "MPCO.CA", "MPRC.CA", "MTIE.CA", "NAHO.CA", "NARE.CA", "NCCW.CA",
+    "NCGC.CA", "NEDA.CA", "NHPS.CA", "NINH.CA", "NIPH.CA", "OBRI.CA", "OCAP.CA", "OCDI.CA",
+    "OCPH.CA", "ODIN.CA", "OFH.CA", "OIH.CA", "OLFI.CA", "ORAS.CA", "ORHD.CA", "ORWE.CA",
+    "PHAR.CA", "PHDC.CA", "PHGC.CA", "PHTV.CA", "POUL.CA", "PRCL.CA", "PRDC.CA", "PRMH.CA",
+    "QNBE.CA", "RACC.CA", "RAKT.CA", "RAYA.CA", "RKAZ.CA", "RMDA.CA", "RMTV.CA", "ROTO.CA",
+    "RREI.CA", "RTVC.CA", "RUBX.CA", "SAUD.CA", "SCEM.CA", "SCFM.CA", "SCTS.CA", "SDTI.CA",
+    "SEIG.CA", "SIEG.CA", "SIPC.CA", "SKPC.CA", "SMFR.CA", "SNFC.CA", "SPIN.CA", "SPMD.CA",
+    "SUCE.CA", "SUGR.CA", "SVCE.CA", "SWDY.CA", "TALM.CA", "TANM.CA", "TAQA.CA", "TMGH.CA",
+    "TORA.CA", "TWSA.CA", "TYCN.CA", "UBEE.CA", "UEFM.CA", "UEGC.CA", "UNIP.CA", "UNIT.CA",
+    "UPMS.CA", "UTOP.CA", "VALU.CA", "VERT.CA", "VLMR.CA", "VLMRA.CA", "WCDF.CA", "WKOL.CA",
+    "ZEOT.CA", "ZMID.CA",
 ]
 
-if __name__ == "__main__":
-    detector = BroadeningBottomDetector(order=4, max_linearity_error=0.015)
-    all_trades = []
 
-    print("Fetching TradingView live prices for EGX stocks...")
-    tv_live_dict = fetch_tradingview_live_data(egyptian_stocks)
+class SuppressStdOut:
+    """كلاس لإخفاء مخرجات وأخطاء النظام أثناء المزامنة"""
+    def __enter__(self):
+        self._original_stderr = sys.stderr
+        self.devnull = open(os.devnull, "w")
+        sys.stderr = self.devnull
 
-    print(f"Scanning {len(egyptian_stocks)} stocks for Broadening Bottoms (1-Year Window)...")
-    for idx, ticker in enumerate(egyptian_stocks, 1):
-        print(f"[{idx}/{len(egyptian_stocks)}] Processing: {ticker}...")
-        trades = run_backtest_on_stock(ticker, detector, tv_live_dict, years=1)
-        all_trades.extend(trades)
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.devnull.close()
+        sys.stderr = self._original_stderr
 
-    df_trades = pd.DataFrame(all_trades)
 
-    if not df_trades.empty:
-        # إزالة التكرارات
-        df_trades.drop_duplicates(subset=['Stock Name', 'Entry Date'], inplace=True)
+# --- إدارة الكاش وإشعارات التلجرام ---
+def get_last_sent_from_file():
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except Exception as e:
+            print(f"⚠️ خطأ في قراءة ملف الكاش: {e}")
+    return ""
 
-        # الترتيب الزمني من الأقدم إلى الأحدث
-        df_trades['Temp Date'] = pd.to_datetime(df_trades['Entry Date'])
-        df_trades.sort_values(by='Temp Date', ascending=True, inplace=True)
-        df_trades.drop(columns=['Temp Date'], inplace=True)
 
-        excel_filename = "Broadening_Bottoms_Scan_Results.xlsx"
-        
-        with pd.ExcelWriter(excel_filename, engine='openpyxl') as writer:
-            df_trades.to_excel(writer, sheet_name='Trades List', index=False)
+def save_last_sent_to_file(message):
+    try:
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            f.write(message.strip())
+    except Exception as e:
+        print(f"⚠️ خطأ في حفظ ملف الكاش: {e}")
 
-        format_excel_file(excel_filename)
-        
-        # ==========================================================
-        # طباعة النتائج مباشرة في الـ Output / Terminal
-        # ==========================================================
-        print("\n" + "=" * 80)
-        print("🎯 SCAN & BACKTEST RESULTS SUMMARY")
-        print("=" * 80)
-        
-        open_trades = df_trades[df_trades['Status'] == 'Open']
-        
-        if not open_trades.empty:
-            print(f"\n[!] Active / Open Positions Found ({len(open_trades)}):")
-            print(open_trades[['Stock Name', 'Entry Date', 'Entry Price', 'Target', 'Stop Loss', 'Current Price', 'Status']].to_string(index=False))
-        else:
-            print("\n[!] No active 'Open' positions at the moment. Showing latest completed trades:")
-            print(df_trades.tail(10)[['Stock Name', 'Entry Date', 'Entry Price', 'Target', 'Stop Loss', 'Exit Date', 'Status']].to_string(index=False))
-            
-        print("\n" + "=" * 80)
 
-        if COLAB_ENV:
-            files.download(excel_filename)
+def send_telegram_notification(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ لم يتم العثور على بيانات TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID.")
+        return
+
+    last_msg = get_last_sent_from_file()
+    if last_msg and last_msg == message.strip():
+        print("⏸️ الرسالة مطابقة تماماً لآخر رسالة تم إرسالها. تم إلغاء الإرسال وتجنب التكرار.")
+        return
+
+    chat_ids = [c.strip() for c in TELEGRAM_CHAT_ID.split(",") if c.strip()]
+    url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    sent_success = False
+    for chat_id in chat_ids:
+        payload = {"chat_id": chat_id, "text": message}
+        try:
+            response = requests.post(url_msg, json=payload, timeout=20)
+            if response.status_code == 200:
+                print(f"✅ تم إرسال الرسالة بنجاح إلى ({chat_id}).")
+                sent_success = True
+            else:
+                print(f"❌ فشل الإرسال إلى ({chat_id}): {response.text}")
+        except Exception as e:
+            print(f"❌ خطأ إتصال أثناء الإرسال لـ ({chat_id}): {e}")
+
+    if sent_success:
+        save_last_sent_to_file(message)
+
+
+# ---------------------------------------------------------
+# 1. سحب بيانات أحدث 7 جلسات تداول من TradingView
+# ---------------------------------------------------------
+def get_recent_trading_days(n=7):
+    """توليد تواريخ أحدث N أيام تداول للبورصة المصرية (باستثناء الجمعة والسبت)"""
+    days = []
+    curr = datetime.now().date()
+    while len(days) < n:
+        if curr.weekday() not in [4, 5]:  # 4 = الجمعة, 5 = السبت
+            days.append(curr)
+        curr -= timedelta(days=1)
+    return days
+
+
+def get_tradingview_last_7_sessions():
+    """سحب أحدث 7 جلسات تداول من TradingView لجميع الأسهم"""
+    url = "https://scanner.tradingview.com/egypt/scan"
+
+    columns = ["name"]
+    for i in range(7):
+        suffix = f"|{i}" if i > 0 else ""
+        columns.extend([f"open{suffix}", f"high{suffix}", f"low{suffix}", f"close{suffix}"])
+
+    payload = {
+        "filter": [{"left": "name", "operation": "nempty"}],
+        "options": {"active_symbols_only": True},
+        "columns": columns,
+        "range": [0, 300],
+    }
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    recent_dates = get_recent_trading_days(7)
+    tv_data_dict = {}
+
+    try:
+        res = requests.post(url, json=payload, headers=headers, timeout=12)
+        data = res.json().get("data", [])
+
+        for item in data:
+            sym = item["s"].replace("EGX:", "")
+            ticker_ca = f"{sym}.CA"
+            d = item["d"]
+
+            bars = []
+            col_idx = 1
+            for i in range(7):
+                o = d[col_idx]
+                h = d[col_idx + 1]
+                l = d[col_idx + 2]
+                c = d[col_idx + 3]
+                col_idx += 4
+
+                if None not in (o, h, l, c) and c > 0:
+                    bars.append({
+                        "date": recent_dates[i],
+                        "open": float(o),
+                        "high": float(h),
+                        "low": float(l),
+                        "close": float(c),
+                    })
+
+            if bars:
+                df_tv = pd.DataFrame(bars).set_index("date").sort_index()
+                tv_data_dict[ticker_ca] = df_tv
+
+    except Exception:
+        pass
+
+    return tv_data_dict
+
+
+# ---------------------------------------------------------
+# 2. خوارزمية تحديد دعوم الصلب (Steel Supports)
+# ---------------------------------------------------------
+def find_steel_supports_optimized(df):
+    lows = df["low"].values
+    highs = df["high"].values
+    opens = df["open"].values
+    closes = df["close"].values
+    segments = df["segment"].values
+    pivots = []
+
+    for i in range(LOOKBACK, len(lows) - LOOKBACK):
+        if lows[i] == min(lows[i - LOOKBACK : i + LOOKBACK + 1]):
+            pivots.append({"index": i, "price": lows[i], "segment": segments[i]})
+
+    steel_levels = []
+    for i in range(len(pivots)):
+        for j in range(i):
+            p1, p2 = pivots[j], pivots[i]
+
+            if p1["segment"] != p2["segment"]:
+                continue
+
+            price_diff = abs(p1["price"] - p2["price"]) / p1["price"]
+            time_diff = p2["index"] - p1["index"]
+
+            if price_diff <= SENSITIVITY and time_diff >= MIN_DAYS_GAP:
+                inter_opens = opens[p1["index"] + 1 : p2["index"]]
+                inter_closes = closes[p1["index"] + 1 : p2["index"]]
+
+                inter_bodies_low = np.minimum(inter_opens, inter_closes)
+                support_level = p1["price"]
+
+                if len(inter_bodies_low) > 0 and np.any(inter_bodies_low < support_level):
+                    continue
+
+                inter_high = max(highs[p1["index"] : p2["index"]])
+                rejection = (inter_high - p1["price"]) / p1["price"]
+
+                if rejection >= REJECTION_POWER:
+                    steel_levels.append({
+                        "price": p2["price"],
+                        "active_from_idx": p2["index"],
+                        "segment": p2["segment"],
+                    })
+                    break
+    return steel_levels
+
+
+# ---------------------------------------------------------
+# 3. معالجة السهم وسد نقص البيانات مع TradingView
+# ---------------------------------------------------------
+def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
+    trades = []
+    try:
+        with SuppressStdOut():
+            ticker_obj = yf.Ticker(ticker)
+            splits = ticker_obj.splits
+            df = yf.download(
+                ticker,
+                start=start_dt,
+                end=end_dt,
+                interval="1d",
+                progress=False,
+                auto_adjust=True,
+            )
+
+        if df.empty or len(df) < 50:
+            return trades
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        df.columns = [c.lower() for c in df.columns]
+        df.index = pd.to_datetime(df.index).date
+
+        # --- سد نقص بيانات yfinance باستخدام أحدث 7 جلسات من TradingView ---
+        if tv_df_7days is not None and not tv_df_7days.empty:
+            last_yf_date = df.index[-1]
+            missing_sessions = tv_df_7days[tv_df_7days.index > last_yf_date]
+
+            if not missing_sessions.empty:
+                df = pd.concat([df, missing_sessions])
+                df = df[~df.index.duplicated(keep="last")].sort_index()
+
+        # حساب شرائح التجزئة (Segments)
+        df["segment"] = 0
+        if not splits.empty:
+            split_dates = pd.to_datetime(splits.index).date
+            segment = 0
+            for d in split_dates:
+                segment += 1
+                df.loc[df.index >= d, "segment"] = segment
+
+        lows, highs, closes, opens = (
+            df["low"].values,
+            df["high"].values,
+            df["close"].values,
+            df["open"].values,
+        )
+        dates = df.index
+
+        all_steel_levels = find_steel_supports_optimized(df)
+
+        in_pos = False
+        entry_p, entry_d, entry_day_close = 0, None, 0
+        cooldown_until_idx = -1
+
+        for i in range(20, len(df)):
+            if not in_pos:
+                if i < cooldown_until_idx:
+                    continue
+
+                available_supports = [
+                    l
+                    for l in all_steel_levels
+                    if l["active_from_idx"] <= i
+                    and l["segment"] == df["segment"].iloc[i]
+                ]
+
+                for support in available_supports:
+                    lvl = support["price"]
+                    upper_bound = lvl * 1.01
+                    lower_bound = lvl * 0.99
+
+                    yesterday_body_low = min(opens[i - 1], closes[i - 1])
+                    was_above = yesterday_body_low > upper_bound
+                    opened_above = opens[i] >= lower_bound
+
+                    if was_above and opened_above:
+                        if lows[i] <= upper_bound and lows[i] >= lower_bound:
+                            if (closes[i] - lvl) / lvl > MAX_ENTRY_SLIPPAGE:
+                                continue
+
+                            entry_p = lvl
+                            entry_d = dates[i]
+                            entry_day_close = closes[i]
+                            in_pos = True
+                            break
+
+            else:
+                target = entry_day_close * (1 + TARGET_PROFIT)
+                stop = entry_p * (1 - STOP_LOSS)
+
+                if highs[i] >= target:
+                    trades.append({
+                        "Ticker": ticker,
+                        "Status": "Win ✅",
+                        "Entry Price": round(entry_p, 3),
+                        "Entry Day Close": round(entry_day_close, 3),
+                        "Exit Price": round(target, 3),
+                        "Return": f"{TARGET_PROFIT*100}%",
+                        "Entry Date": entry_d,
+                        "Exit Date": dates[i],
+                        "Days Held": (dates[i] - entry_d).days,
+                    })
+                    in_pos, cooldown_until_idx = False, i + 14
+
+                elif lows[i] <= stop:
+                    trades.append({
+                        "Ticker": ticker,
+                        "Status": "Loss ❌",
+                        "Entry Price": round(entry_p, 3),
+                        "Entry Day Close": round(entry_day_close, 3),
+                        "Exit Price": round(stop, 3),
+                        "Return": f"-{STOP_LOSS*100}%",
+                        "Entry Date": entry_d,
+                        "Exit Date": dates[i],
+                        "Days Held": (dates[i] - entry_d).days,
+                    })
+                    in_pos, cooldown_until_idx = False, i + 1
+
+                elif i == len(df) - 1:
+                    current_return = (
+                        (closes[i] - entry_day_close) / entry_day_close
+                    ) * 100
+                    trades.append({
+                        "Ticker": ticker,
+                        "Status": "Open ⏳",
+                        "Entry Price": round(entry_p, 3),
+                        "Entry Day Close": round(entry_day_close, 3),
+                        "Exit Price": round(closes[i], 3),
+                        "Return": f"{current_return:.2f}% (Floating)",
+                        "Entry Date": entry_d,
+                        "Exit Date": dates[i],
+                        "Days Held": (dates[i] - entry_d).days,
+                    })
+
+    except Exception:
+        pass
+    return trades
+
+
+# ---------------------------------------------------------
+# 4. دورة مسح واحدة واستخراج الفرص النشطة
+# ---------------------------------------------------------
+def single_pass_backtest():
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=10 * 365)
+
+    start_str = start_date.strftime("%Y-%m-%d")
+    end_str = end_date.strftime("%Y-%m-%d")
+
+    tv_7days_data = get_tradingview_last_7_sessions()
+
+    open_trades = []
+    latest_dates = []
+
+    with ProcessPoolExecutor() as executor:
+        futures = {
+            executor.submit(
+                process_stock, ticker, start_str, end_str, tv_7days_data.get(ticker)
+            ): ticker
+            for ticker in egyptian_stocks
+        }
+        for future in as_completed(futures):
+            res = future.result()
+            if res:
+                for trade in res:
+                    if trade.get("Status") == "Open ⏳":
+                        open_trades.append(trade)
+                        if trade.get("Exit Date"):
+                            latest_dates.append(trade.get("Exit Date"))
+
+    data_date_str = ""
+    if latest_dates:
+        most_common_date = Counter(latest_dates).most_common(1)[0][0]
+        if isinstance(most_common_date, str):
+            most_common_date = datetime.strptime(most_common_date, "%Y-%m-%d").date()
+        day_english = most_common_date.strftime("%A")
+        day_arabic = DAYS_ARABIC.get(day_english, day_english)
+        data_date_str = f"{day_arabic} {most_common_date.strftime('%d/%m/%Y')}"
+
+    return open_trades, data_date_str
+
+
+# ---------------------------------------------------------
+# 5. الفحص الهجين المركب مع الإرسال عبر التلجرام
+# ---------------------------------------------------------
+def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=10):
+    print(
+        f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 بدء الفحص الهجين المركب (Yahoo + TradingView - {total_checks} دورات)..."
+    )
+
+    ticker_counts = Counter()
+    latest_trade_info = {}
+    detected_data_date = ""
+
+    for check_num in range(1, total_checks + 1):
+        print(f"🔄 [دورة {check_num}/{total_checks}] جاري سحب البيانات المدمجة واستخراج الفرص...")
+        open_trades, data_date_str = single_pass_backtest()
+
+        if data_date_str:
+            detected_data_date = data_date_str
+
+        found_tickers = []
+        for trade in open_trades:
+            t = trade["Ticker"]
+            found_tickers.append(t)
+            latest_trade_info[t] = trade
+
+        ticker_counts.update(found_tickers)
+        print(
+            f"   ✓ تم العثور على {len(found_tickers)} صفقة مفتوحة في هذه الدورة (جلسة: {detected_data_date})."
+        )
+
+        if check_num < total_checks and delay_between_checks > 0:
+            time.sleep(delay_between_checks)
+
+    confirmed_trades = []
+    for ticker, count in ticker_counts.items():
+        if count >= min_occurrences:
+            trade_data = latest_trade_info[ticker]
+            confirmed_trades.append(trade_data)
+
+    header_date = f" (جلسة {detected_data_date})" if detected_data_date else ""
+
+    if confirmed_trades:
+        msg = f"🚀 نتائج فحص البورصة المصرية المدمج{header_date}:\n\n"
+        for row in confirmed_trades:
+            entry_close = row.get("Entry Day Close", 0)
+            entry_p = row.get("Entry Price", 0)
+            curr_p = row.get("Exit Price", 0)
+            ret_val = row.get("Return", "0%")
+
+            target_p = round(entry_close * (1 + TARGET_PROFIT), 3)
+            stop_p = round(entry_p * (1 - STOP_LOSS), 3)
+
+            msg += f"📈 السهم: {row['Ticker']}\n"
+            msg += f"📅 تاريخ الدخول: {row.get('Entry Date', '')}\n"
+            msg += f"📩 سعر الدعم: {entry_p}\n"
+            msg += f"🔔 سعر إغلاق يوم الدخول: {entry_close}\n"
+            msg += f"💲 السعر الحالي: {curr_p}\n"
+            msg += f"📊 العائد العائم: {ret_val}\n"
+            msg += f"🎯 الهدف : {target_p}\n"
+            msg += f"🛑 وقف الخسارة : {stop_p}\n"
+            msg += "=============\n"
+        print("\n" + msg)
     else:
-        print("\nNo Broadening Bottom patterns detected in the current period.")
+        msg = f"⚠️ تقرير الفحص اليومي{header_date}:\nتم فحص جميع الأسهم بنجاح، ولا توجد فرص تنطبق عليها الشروط حالياً."
+        print("\n" + msg)
+
+    send_telegram_notification(msg)
+
+
+if __name__ == "__main__":
+    run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=10)
 
