@@ -417,11 +417,12 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
 
 
 # ---------------------------------------------------------
-# 4. دورة مسح واحدة واستخراج الفرص النشطة
+# 4. دورة مسح واحدة واستخراج الفرص النشطة (تعديل آخر سنة فقط)
 # ---------------------------------------------------------
 def single_pass_backtest():
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=10 * 365)
+    # 🚨 التعديل الأول: الفحص على آخر سنة فقط (365 يوماً) بدلاً من 10 سنوات
+    start_date = end_date - timedelta(days=365)
 
     start_str = start_date.strftime("%Y-%m-%d")
     end_str = end_date.strftime("%Y-%m-%d")
@@ -464,13 +465,14 @@ def single_pass_backtest():
 # ---------------------------------------------------------
 def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=10):
     print(
-        f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 بدء الفحص الهجين المركب (مع تصفية الأسهم حسب السيولة > 500,000 ج.م)..."
+        f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 بدء الفحص الهجين المركب (مع تصفية الأسهم حسب السيولة > 500,000 ج.م - آخر سنة فقط)..."
     )
 
     ticker_counts = Counter()
     latest_trade_info = {}
     detected_data_date = ""
 
+    # 🚨 التعديل الثاني: إجراء 3 دورات فحص وتأكيد الصفقة فقط عند ظهورها في دورتين على الأقل
     for check_num in range(1, total_checks + 1):
         print(f"🔄 [دورة {check_num}/{total_checks}] جاري سحب البيانات المدمجة واستخراج الفرص...")
         open_trades, data_date_str = single_pass_backtest()
@@ -492,6 +494,7 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
         if check_num < total_checks and delay_between_checks > 0:
             time.sleep(delay_between_checks)
 
+    # تصفية الصفقات للتأكد من تكرارها مرتين أو أكثر من أصل 3 دورات
     confirmed_trades = []
     for ticker, count in ticker_counts.items():
         if count >= min_occurrences:
@@ -529,4 +532,5 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
 
 
 if __name__ == "__main__":
+    # تنفيذ الفحص على 3 دورات والتأكد من ظهور الصفقة في دورتين على الأقل (2/3)
     run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=10)
