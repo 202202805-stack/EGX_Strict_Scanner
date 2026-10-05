@@ -83,8 +83,8 @@ class SuppressStdOut:
         sys.stderr = self.devnull
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.devnull.close()
         sys.stderr = self._original_stderr
+        self.devnull.close()
 
 
 # --- إدارة الكاش وإشعارات التلجرام ---
@@ -182,20 +182,21 @@ def get_tradingview_last_7_sessions():
             bars = []
             col_idx = 1
             for i in range(7):
-                o = d[col_idx]
-                h = d[col_idx + 1]
-                l = d[col_idx + 2]
-                c = d[col_idx + 3]
-                col_idx += 4
+                if col_idx + 3 < len(d):
+                    o = d[col_idx]
+                    h = d[col_idx + 1]
+                    l = d[col_idx + 2]
+                    c = d[col_idx + 3]
+                    col_idx += 4
 
-                if None not in (o, h, l, c) and c > 0:
-                    bars.append({
-                        "date": recent_dates[i],
-                        "open": float(o),
-                        "high": float(h),
-                        "low": float(l),
-                        "close": float(c),
-                    })
+                    if None not in (o, h, l, c) and c > 0:
+                        bars.append({
+                            "date": recent_dates[i],
+                            "open": float(o),
+                            "high": float(h),
+                            "low": float(l),
+                            "close": float(c),
+                        })
 
             if bars:
                 df_tv = pd.DataFrame(bars).set_index("date").sort_index()
@@ -280,7 +281,7 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        df.columns = [c.lower() for c in df.columns]
+        df.columns = [str(c).lower() for c in df.columns]
         df.index = pd.to_datetime(df.index).date
 
         # --- سد نقص بيانات yfinance باستخدام أحدث 7 جلسات من TradingView ---
@@ -294,7 +295,7 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
 
         # حساب شرائح التجزئة (Segments)
         df["segment"] = 0
-        if not splits.empty:
+        if splits is not None and not splits.empty:
             split_dates = pd.to_datetime(splits.index).date
             segment = 0
             for d in split_dates:
@@ -514,4 +515,3 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
 
 if __name__ == "__main__":
     run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=10)
-
