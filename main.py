@@ -27,9 +27,7 @@ REJECTION_POWER = 0.16
 TARGET_PROFIT = 0.05
 STOP_LOSS = 0.04
 MAX_ENTRY_SLIPPAGE = 0.013
-MIN_10D_AVG_VOLUME_VALUE = (
-    500000  # 🚨 الحد الأدنى لمتوسط قيمة التداول اليومية (نصف مليون)
-)
+MIN_10D_AVG_VOLUME_VALUE = 500000  # 🚨 الحد الأدنى لمتوسط قيمة التداول اليومية (نصف مليون)
 
 # قاموس ترجمة أسماء الأيام للعربية
 DAYS_ARABIC = {
@@ -44,254 +42,42 @@ DAYS_ARABIC = {
 
 # 🚨 قائمة الأسهم المصرية المعتمدة حصراً 🚨
 egyptian_stocks = [
-    "AALR.CA",
-    "ABUK.CA",
-    "ACAMD.CA",
-    "ACAP.CA",
-    "ACGC.CA",
-    "ACTF.CA",
-    "ADCI.CA",
-    "ADIB.CA",
-    "ADPC.CA",
-    "ADRI.CA",
-    "AFDI.CA",
-    "AFMC.CA",
-    "AIDC.CA",
-    "AIFI.CA",
-    "AIH.CA",
-    "AJWA.CA",
-    "ALCN.CA",
-    "ALEX.CA",
-    "ALUM.CA",
-    "AMER.CA",
-    "AMES.CA",
-    "AMIA.CA",
-    "AMII.CA",
-    "AMOC.CA",
-    "AMPI.CA",
-    "APSW.CA",
-    "ARAB.CA",
-    "ARCC.CA",
-    "AREH.CA",
-    "ASCM.CA",
-    "ASPI.CA",
-    "ATLC.CA",
-    "ATQA.CA",
-    "AXPH.CA",
-    "BIDI.CA",
-    "BIGP.CA",
-    "BINV.CA",
-    "BIOC.CA",
-    "BONY.CA",
-    "BTFH.CA",
-    "CAED.CA",
-    "CANA.CA",
-    "CCAP.CA",
-    "CCRS.CA",
-    "CEFM.CA",
-    "CERA.CA",
-    "CFGH.CA",
-    "CICH.CA",
-    "CIEB.CA",
-    "CIRA.CA",
-    "CLHO.CA",
-    "CNFN.CA",
-    "COMI.CA",
-    "COPR.CA",
-    "COSG.CA",
-    "CPCI.CA",
-    "CPME.CA",
-    "CRST.CA",
-    "CSAG.CA",
-    "DAPH.CA",
-    "DCRC.CA",
-    "DEIN.CA",
-    "DGTZ.CA",
-    "DOMT.CA",
-    "DSCW.CA",
-    "DTPP.CA",
-    "EALR.CA",
-    "EASB.CA",
-    "EAST.CA",
-    "EBSC.CA",
-    "ECAP.CA",
-    "EDFM.CA",
-    "EEII.CA",
-    "EFIC.CA",
-    "EFID.CA",
-    "EFIH.CA",
-    "EGAL.CA",
-    "EGAS.CA",
-    "EGBE.CA",
-    "EGCH.CA",
-    "EGREF.CA",
-    "EGSA.CA",
-    "EGTS.CA",
-    "EHDR.CA",
-    "ELAB.CA",
-    "ELEC.CA",
-    "ELKA.CA",
-    "ELNA.CA",
-    "ELSH.CA",
-    "ELWA.CA",
-    "EMFD.CA",
-    "ENGC.CA",
-    "EOSB.CA",
-    "EPCO.CA",
-    "EPPK.CA",
-    "ETEL.CA",
-    "ETRS.CA",
-    "EXPA.CA",
-    "FAIT.CA",
-    "FAITA.CA",
-    "FCMD.CA",
-    "FIRE.CA",
-    "FNAR.CA",
-    "FTNS.CA",
-    "FWRY.CA",
-    "GBCO.CA",
-    "GDWA.CA",
-    "GGCC.CA",
-    "GGRN.CA",
-    "GIHD.CA",
-    "GMCI.CA",
-    "GOUR.CA",
-    "GPIM.CA",
-    "GRCA.CA",
-    "GSSC.CA",
-    "GTEX.CA",
-    "GTHE.CA",
-    "GTWL.CA",
-    "HBCO.CA",
-    "HDBK.CA",
-    "HELI.CA",
-    "HRHO.CA",
-    "IBCT.CA",
-    "ICFC.CA",
-    "ICID.CA",
-    "IDRE.CA",
-    "IEEC.CA",
-    "IFAP.CA",
-    "INEG.CA",
-    "INFI.CA",
-    "IRON.CA",
-    "ISMA.CA",
-    "ISMQ.CA",
-    "ISPH.CA",
-    "JUFO.CA",
-    "KABO.CA",
-    "KORA.CA",
-    "KRDI.CA",
-    "KWIN.CA",
-    "KZPC.CA",
-    "LCSW.CA",
-    "LKGP.CA",
-    "LUTS.CA",
-    "MAAL.CA",
-    "MASR.CA",
-    "MBEG.CA",
-    "MBSC.CA",
-    "MCQE.CA",
-    "MCRO.CA",
-    "MENA.CA",
-    "MEPA.CA",
-    "MFPC.CA",
-    "MFSC.CA",
-    "MHOT.CA",
-    "MICH.CA",
-    "MILS.CA",
-    "MIPH.CA",
-    "MOED.CA",
-    "MOIL.CA",
-    "MOIN.CA",
-    "MOSC.CA",
-    "MPCI.CA",
-    "MPCO.CA",
-    "MPRC.CA",
-    "MTIE.CA",
-    "NAHO.CA",
-    "NARE.CA",
-    "NCCW.CA",
-    "NCGC.CA",
-    "NEDA.CA",
-    "NHPS.CA",
-    "NINH.CA",
-    "NIPH.CA",
-    "OBRI.CA",
-    "OCAP.CA",
-    "OCDI.CA",
-    "OCPH.CA",
-    "ODIN.CA",
-    "OFH.CA",
-    "OIH.CA",
-    "OLFI.CA",
-    "ORAS.CA",
-    "ORHD.CA",
-    "ORWE.CA",
-    "PHAR.CA",
-    "PHDC.CA",
-    "PHGC.CA",
-    "PHTV.CA",
-    "POUL.CA",
-    "PRCL.CA",
-    "PRDC.CA",
-    "PRMH.CA",
-    "QNBE.CA",
-    "RACC.CA",
-    "RAKT.CA",
-    "RAYA.CA",
-    "RKAZ.CA",
-    "RMDA.CA",
-    "RMTV.CA",
-    "ROTO.CA",
-    "RREI.CA",
-    "RTVC.CA",
-    "RUBX.CA",
-    "SAUD.CA",
-    "SCEM.CA",
-    "SCFM.CA",
-    "SCTS.CA",
-    "SDTI.CA",
-    "SEIG.CA",
-    "SIEG.CA",
-    "SIPC.CA",
-    "SKPC.CA",
-    "SMFR.CA",
-    "SNFC.CA",
-    "SPIN.CA",
-    "SPMD.CA",
-    "SUCE.CA",
-    "SUGR.CA",
-    "SVCE.CA",
-    "SWDY.CA",
-    "TALM.CA",
-    "TANM.CA",
-    "TAQA.CA",
-    "TMGH.CA",
-    "TORA.CA",
-    "TWSA.CA",
-    "TYCN.CA",
-    "UBEE.CA",
-    "UEFM.CA",
-    "UEGC.CA",
-    "UNIP.CA",
-    "UNIT.CA",
-    "UPMS.CA",
-    "UTOP.CA",
-    "VALU.CA",
-    "VERT.CA",
-    "VLMR.CA",
-    "VLMRA.CA",
-    "WCDF.CA",
-    "WKOL.CA",
-    "ZEOT.CA",
-    "ZMID.CA",
+    "AALR.CA", "ABUK.CA", "ACAMD.CA", "ACAP.CA", "ACGC.CA", "ACTF.CA", "ADCI.CA", "ADIB.CA",
+    "ADPC.CA", "ADRI.CA", "AFDI.CA", "AFMC.CA", "AIDC.CA", "AIFI.CA", "AIH.CA", "AJWA.CA",
+    "ALCN.CA", "ALEX.CA", "ALUM.CA", "AMER.CA", "AMES.CA", "AMIA.CA", "AMII.CA", "AMOC.CA",
+    "AMPI.CA", "APSW.CA", "ARAB.CA", "ARCC.CA", "AREH.CA", "ASCM.CA", "ASPI.CA", "ATLC.CA",
+    "ATQA.CA", "AXPH.CA", "BIDI.CA", "BIGP.CA", "BINV.CA", "BIOC.CA", "BONY.CA", "BTFH.CA",
+    "CAED.CA", "CANA.CA", "CCAP.CA", "CCRS.CA", "CEFM.CA", "CERA.CA", "CFGH.CA", "CICH.CA",
+    "CIEB.CA", "CIRA.CA", "CLHO.CA", "CNFN.CA", "COMI.CA", "COPR.CA", "COSG.CA", "CPCI.CA",
+    "CPME.CA", "CRST.CA", "CSAG.CA", "DAPH.CA", "DCRC.CA", "DEIN.CA", "DGTZ.CA", "DOMT.CA",
+    "DSCW.CA", "DTPP.CA", "EALR.CA", "EASB.CA", "EAST.CA", "EBSC.CA", "ECAP.CA", "EDFM.CA",
+    "EEII.CA", "EFIC.CA", "EFID.CA", "EFIH.CA", "EGAL.CA", "EGAS.CA", "EGBE.CA", "EGCH.CA",
+    "EGREF.CA", "EGSA.CA", "EGTS.CA", "EHDR.CA", "ELAB.CA", "ELEC.CA", "ELKA.CA", "ELNA.CA",
+    "ELSH.CA", "ELWA.CA", "EMFD.CA", "ENGC.CA", "EOSB.CA", "EPCO.CA", "EPPK.CA", "ETEL.CA",
+    "ETRS.CA", "EXPA.CA", "FAIT.CA", "FAITA.CA", "FCMD.CA", "FIRE.CA", "FNAR.CA", "FTNS.CA",
+    "FWRY.CA", "GBCO.CA", "GDWA.CA", "GGCC.CA", "GGRN.CA", "GIHD.CA", "GMCI.CA", "GOUR.CA",
+    "GPIM.CA", "GRCA.CA", "GSSC.CA", "GTEX.CA", "GTHE.CA", "GTWL.CA", "HBCO.CA", "HDBK.CA",
+    "HELI.CA", "HRHO.CA", "IBCT.CA", "ICFC.CA", "ICID.CA", "IDRE.CA", "IEEC.CA", "IFAP.CA",
+    "INEG.CA", "INFI.CA", "IRON.CA", "ISMA.CA", "ISMQ.CA", "ISPH.CA", "JUFO.CA", "KABO.CA",
+    "KORA.CA", "KRDI.CA", "KWIN.CA", "KZPC.CA", "LCSW.CA", "LKGP.CA", "LUTS.CA", "MAAL.CA",
+    "MASR.CA", "MBEG.CA", "MBSC.CA", "MCQE.CA", "MCRO.CA", "MENA.CA", "MEPA.CA", "MFPC.CA",
+    "MFSC.CA", "MHOT.CA", "MICH.CA", "MILS.CA", "MIPH.CA", "MOED.CA", "MOIL.CA", "MOIN.CA",
+    "MOSC.CA", "MPCI.CA", "MPCO.CA", "MPRC.CA", "MTIE.CA", "NAHO.CA", "NARE.CA", "NCCW.CA",
+    "NCGC.CA", "NEDA.CA", "NHPS.CA", "NINH.CA", "NIPH.CA", "OBRI.CA", "OCAP.CA", "OCDI.CA",
+    "OCPH.CA", "ODIN.CA", "OFH.CA", "OIH.CA", "OLFI.CA", "ORAS.CA", "ORHD.CA", "ORWE.CA",
+    "PHAR.CA", "PHDC.CA", "PHGC.CA", "PHTV.CA", "POUL.CA", "PRCL.CA", "PRDC.CA", "PRMH.CA",
+    "QNBE.CA", "RACC.CA", "RAKT.CA", "RAYA.CA", "RKAZ.CA", "RMDA.CA", "RMTV.CA", "ROTO.CA",
+    "RREI.CA", "RTVC.CA", "RUBX.CA", "SAUD.CA", "SCEM.CA", "SCFM.CA", "SCTS.CA", "SDTI.CA",
+    "SEIG.CA", "SIEG.CA", "SIPC.CA", "SKPC.CA", "SMFR.CA", "SNFC.CA", "SPIN.CA", "SPMD.CA",
+    "SUCE.CA", "SUGR.CA", "SVCE.CA", "SWDY.CA", "TALM.CA", "TANM.CA", "TAQA.CA", "TMGH.CA",
+    "TORA.CA", "TWSA.CA", "TYCN.CA", "UBEE.CA", "UEFM.CA", "UEGC.CA", "UNIP.CA", "UNIT.CA",
+    "UPMS.CA", "UTOP.CA", "VALU.CA", "VERT.CA", "VLMR.CA", "VLMRA.CA", "WCDF.CA", "WKOL.CA",
+    "ZEOT.CA", "ZMID.CA",
 ]
 
 
 class SuppressStdOut:
     """كلاس لإخفاء مخرجات وأخطاء النظام أثناء المزامنة"""
-
     def __enter__(self):
         self._original_stderr = sys.stderr
         self.devnull = open(os.devnull, "w")
@@ -323,14 +109,12 @@ def save_last_sent_to_file(message):
 
 def send_telegram_notification(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ لم يتم العثور على بيانات TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID.")
+        print("⚠️️ لم يتم العثور على بيانات TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID.")
         return
 
     last_msg = get_last_sent_from_file()
     if last_msg and last_msg == message.strip():
-        print(
-            "⏸️ الرسالة مطابقة تماماً لآخر رسالة تم إرسالها. تم إلغاء الإرسال وتجنب التكرار."
-        )
+        print("⏸️ الرسالة مطابقة تماماً لآخر رسالة تم إرسالها. تم إلغاء الإرسال وتجنب التكرار.")
         return
 
     chat_ids = [c.strip() for c in TELEGRAM_CHAT_ID.split(",") if c.strip()]
@@ -374,15 +158,7 @@ def get_tradingview_last_7_sessions():
     columns = ["name"]
     for i in range(7):
         suffix = f"|{i}" if i > 0 else ""
-        columns.extend(
-            [
-                f"open{suffix}",
-                f"high{suffix}",
-                f"low{suffix}",
-                f"close{suffix}",
-                f"volume{suffix}",
-            ]
-        )
+        columns.extend([f"open{suffix}", f"high{suffix}", f"low{suffix}", f"close{suffix}", f"volume{suffix}"])
 
     payload = {
         "filter": [{"left": "name", "operation": "nempty"}],
@@ -416,16 +192,14 @@ def get_tradingview_last_7_sessions():
                     col_idx += 5
 
                     if None not in (o, h, l, c) and c > 0:
-                        bars.append(
-                            {
-                                "date": recent_dates[i],
-                                "open": float(o),
-                                "high": float(h),
-                                "low": float(l),
-                                "close": float(c),
-                                "volume": float(v) if v is not None else 0.0,
-                            }
-                        )
+                        bars.append({
+                            "date": recent_dates[i],
+                            "open": float(o),
+                            "high": float(h),
+                            "low": float(l),
+                            "close": float(c),
+                            "volume": float(v) if v is not None else 0.0,
+                        })
 
             if bars:
                 df_tv = pd.DataFrame(bars).set_index("date").sort_index()
@@ -470,22 +244,18 @@ def find_steel_supports_optimized(df):
                 inter_bodies_low = np.minimum(inter_opens, inter_closes)
                 support_level = p1["price"]
 
-                if len(inter_bodies_low) > 0 and np.any(
-                    inter_bodies_low < support_level
-                ):
+                if len(inter_bodies_low) > 0 and np.any(inter_bodies_low < support_level):
                     continue
 
                 inter_high = max(highs[p1["index"] : p2["index"]])
                 rejection = (inter_high - p1["price"]) / p1["price"]
 
                 if rejection >= REJECTION_POWER:
-                    steel_levels.append(
-                        {
-                            "price": p2["price"],
-                            "active_from_idx": p2["index"],
-                            "segment": p2["segment"],
-                        }
-                    )
+                    steel_levels.append({
+                        "price": p2["price"],
+                        "active_from_idx": p2["index"],
+                        "segment": p2["segment"],
+                    })
                     break
     return steel_levels
 
@@ -584,9 +354,7 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
 
                     if was_above and opened_above:
                         if lows[i] <= upper_bound and lows[i] >= lower_bound:
-                            if (
-                                closes[i] - lvl
-                            ) / lvl > MAX_ENTRY_SLIPPAGE:
+                            if (closes[i] - lvl) / lvl > MAX_ENTRY_SLIPPAGE:
                                 continue
 
                             entry_p = lvl
@@ -600,54 +368,48 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
                 stop = entry_p * (1 - STOP_LOSS)
 
                 if highs[i] >= target:
-                    trades.append(
-                        {
-                            "Ticker": ticker,
-                            "Status": "Win ✅",
-                            "Entry Price": round(entry_p, 3),
-                            "Entry Day Close": round(entry_day_close, 3),
-                            "Exit Price": round(target, 3),
-                            "Return": f"{TARGET_PROFIT*100}%",
-                            "Entry Date": entry_d,
-                            "Exit Date": dates[i],
-                            "Days Held": (dates[i] - entry_d).days,
-                        }
-                    )
+                    trades.append({
+                        "Ticker": ticker,
+                        "Status": "Win ✅",
+                        "Entry Price": round(entry_p, 3),
+                        "Entry Day Close": round(entry_day_close, 3),
+                        "Exit Price": round(target, 3),
+                        "Return": f"{TARGET_PROFIT*100}%",
+                        "Entry Date": entry_d,
+                        "Exit Date": dates[i],
+                        "Days Held": (dates[i] - entry_d).days,
+                    })
                     in_pos, cooldown_until_idx = False, i + 14
 
                 elif lows[i] <= stop:
-                    trades.append(
-                        {
-                            "Ticker": ticker,
-                            "Status": "Loss ❌",
-                            "Entry Price": round(entry_p, 3),
-                            "Entry Day Close": round(entry_day_close, 3),
-                            "Exit Price": round(stop, 3),
-                            "Return": f"-{STOP_LOSS*100}%",
-                            "Entry Date": entry_d,
-                            "Exit Date": dates[i],
-                            "Days Held": (dates[i] - entry_d).days,
-                        }
-                    )
+                    trades.append({
+                        "Ticker": ticker,
+                        "Status": "Loss ❌",
+                        "Entry Price": round(entry_p, 3),
+                        "Entry Day Close": round(entry_day_close, 3),
+                        "Exit Price": round(stop, 3),
+                        "Return": f"-{STOP_LOSS*100}%",
+                        "Entry Date": entry_d,
+                        "Exit Date": dates[i],
+                        "Days Held": (dates[i] - entry_d).days,
+                    })
                     in_pos, cooldown_until_idx = False, i + 1
 
                 elif i == len(df) - 1:
                     current_return = (
                         (closes[i] - entry_day_close) / entry_day_close
                     ) * 100
-                    trades.append(
-                        {
-                            "Ticker": ticker,
-                            "Status": "Open ⏳",
-                            "Entry Price": round(entry_p, 3),
-                            "Entry Day Close": round(entry_day_close, 3),
-                            "Exit Price": round(closes[i], 3),
-                            "Return": f"{current_return:.2f}% (Floating)",
-                            "Entry Date": entry_d,
-                            "Exit Date": dates[i],
-                            "Days Held": (dates[i] - entry_d).days,
-                        }
-                    )
+                    trades.append({
+                        "Ticker": ticker,
+                        "Status": "Open ⏳",
+                        "Entry Price": round(entry_p, 3),
+                        "Entry Day Close": round(entry_day_close, 3),
+                        "Exit Price": round(closes[i], 3),
+                        "Return": f"{current_return:.2f}% (Floating)",
+                        "Entry Date": entry_d,
+                        "Exit Date": dates[i],
+                        "Days Held": (dates[i] - entry_d).days,
+                    })
 
     except Exception:
         pass
@@ -659,8 +421,7 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
 # ---------------------------------------------------------
 def single_pass_backtest():
     end_date = datetime.now()
-    # 🎯 تم التعديل هنا: سحب بيانات آخر سنة فقط (365 يوم) بدلاً من 10 سنوات
-    start_date = end_date - timedelta(days=365)
+    start_date = end_date - timedelta(days=10 * 365)
 
     start_str = start_date.strftime("%Y-%m-%d")
     end_str = end_date.strftime("%Y-%m-%d")
@@ -673,11 +434,7 @@ def single_pass_backtest():
     with ProcessPoolExecutor() as executor:
         futures = {
             executor.submit(
-                process_stock,
-                ticker,
-                start_str,
-                end_str,
-                tv_7days_data.get(ticker),
+                process_stock, ticker, start_str, end_str, tv_7days_data.get(ticker)
             ): ticker
             for ticker in egyptian_stocks
         }
@@ -694,9 +451,7 @@ def single_pass_backtest():
     if latest_dates:
         most_common_date = Counter(latest_dates).most_common(1)[0][0]
         if isinstance(most_common_date, str):
-            most_common_date = datetime.strptime(
-                most_common_date, "%Y-%m-%d"
-            ).date()
+            most_common_date = datetime.strptime(most_common_date, "%Y-%m-%d").date()
         day_english = most_common_date.strftime("%A")
         day_arabic = DAYS_ARABIC.get(day_english, day_english)
         data_date_str = f"{day_arabic} {most_common_date.strftime('%d/%m/%Y')}"
@@ -717,9 +472,7 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
     detected_data_date = ""
 
     for check_num in range(1, total_checks + 1):
-        print(
-            f"🔄 [دورة {check_num}/{total_checks}] جاري سحب البيانات المدمجة واستخراج الفرص..."
-        )
+        print(f"🔄 [دورة {check_num}/{total_checks}] جاري سحب البيانات المدمجة واستخراج الفرص...")
         open_trades, data_date_str = single_pass_backtest()
 
         if data_date_str:
@@ -733,7 +486,7 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
 
         ticker_counts.update(found_tickers)
         print(
-            f"    ✓ تم العثور على {len(found_tickers)} صفقة مفتوحة مستوفية لشروط السيولة فالدورة."
+            f"   ✓ تم العثور على {len(found_tickers)} صفقة مفتوحة مستوفية لشروط السيولة فالدورة."
         )
 
         if check_num < total_checks and delay_between_checks > 0:
@@ -776,9 +529,4 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
 
 
 if __name__ == "__main__":
-    run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=10)
-
-
-if __name__ == "__main__":
-    # تنفيذ الفحص على 3 دورات والتأكد من ظهور الصفقة في دورتين على الأقل (2/3)
     run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=10)
