@@ -27,6 +27,7 @@ REJECTION_POWER = 0.16
 TARGET_PROFIT = 0.05
 STOP_LOSS = 0.04
 MAX_ENTRY_SLIPPAGE = 0.013
+MIN_10D_AVG_VOLUME_VALUE = 500000  # 🚨 الحد الأدنى لمتوسط قيمة التداول اليومية (نصف مليون)
 
 # قاموس ترجمة أسماء الأيام للعربية
 DAYS_ARABIC = {
@@ -157,7 +158,7 @@ def get_tradingview_last_7_sessions():
     columns = ["name"]
     for i in range(7):
         suffix = f"|{i}" if i > 0 else ""
-        columns.extend([f"open{suffix}", f"high{suffix}", f"low{suffix}", f"close{suffix}"])
+        columns.extend([f"open{suffix}", f"high{suffix}", f"low{suffix}", f"close{suffix}", f"volume{suffix}"])
 
     payload = {
         "filter": [{"left": "name", "operation": "nempty"}],
@@ -182,12 +183,13 @@ def get_tradingview_last_7_sessions():
             bars = []
             col_idx = 1
             for i in range(7):
-                if col_idx + 3 < len(d):
+                if col_idx + 4 < len(d):
                     o = d[col_idx]
                     h = d[col_idx + 1]
                     l = d[col_idx + 2]
                     c = d[col_idx + 3]
-                    col_idx += 4
+                    v = d[col_idx + 4]
+                    col_idx += 5
 
                     if None not in (o, h, l, c) and c > 0:
                         bars.append({
@@ -196,6 +198,7 @@ def get_tradingview_last_7_sessions():
                             "high": float(h),
                             "low": float(l),
                             "close": float(c),
+                            "volume": float(v) if v is not None else 0.0,
                         })
 
             if bars:
@@ -302,12 +305,20 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
                 segment += 1
                 df.loc[df.index >= d, "segment"] = segment
 
+        # حساب قيمة التداول اليومية (Turnover = Volume * Close)
+        if "volume" in df.columns:
+            df["trade_value"] = df["volume"] * df["close"]
+            df["avg_10d_value"] = df["trade_value"].rolling(window=10).mean()
+        else:
+            df["avg_10d_value"] = 0
+
         lows, highs, closes, opens = (
             df["low"].values,
             df["high"].values,
             df["close"].values,
             df["open"].values,
         )
+        avg_10d_vals = df["avg_10d_value"].values
         dates = df.index
 
         all_steel_levels = find_steel_supports_optimized(df)
@@ -319,6 +330,10 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
         for i in range(20, len(df)):
             if not in_pos:
                 if i < cooldown_until_idx:
+                    continue
+
+                # 🚨 شرط عدم دخول الصفقة إذا كان متوسط تداول أخر 10 أيام أقل من 500,000 جنيه 🚨
+                if avg_10d_vals[i] < MIN_10D_AVG_VOLUME_VALUE:
                     continue
 
                 available_supports = [
@@ -449,7 +464,7 @@ def single_pass_backtest():
 # ---------------------------------------------------------
 def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=10):
     print(
-        f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 بدء الفحص الهجين المركب (Yahoo + TradingView - {total_checks} دورات)..."
+        f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 بدء الفحص الهجين المركب (مع تصفية الأسهم حسب السيولة > 500,000 ج.م)..."
     )
 
     ticker_counts = Counter()
@@ -471,7 +486,7 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
 
         ticker_counts.update(found_tickers)
         print(
-            f"   ✓ تم العثور على {len(found_tickers)} صفقة مفتوحة في هذه الدورة (جلسة: {detected_data_date})."
+            f"   ✓ تم العثور على {len(found_tickers)} صفقة مفتوحة مستوفية لشروط السيولة فالدورة."
         )
 
         if check_num < total_checks and delay_between_checks > 0:
