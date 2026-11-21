@@ -3,11 +3,9 @@ import sys
 import time
 import warnings
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 import numpy as np
-import openpyxl
 import pandas as pd
 import requests
 import yfinance as yf
@@ -29,7 +27,6 @@ STOP_LOSS = 0.04
 MAX_ENTRY_SLIPPAGE = 0.013
 MIN_10D_AVG_VOLUME_VALUE = 500000  # 🚨 الحد الأدنى لمتوسط قيمة التداول اليومية (نصف مليون)
 
-# قاموس ترجمة أسماء الأيام للعربية
 DAYS_ARABIC = {
     "Saturday": "السبت",
     "Sunday": "الأحد",
@@ -40,7 +37,6 @@ DAYS_ARABIC = {
     "Friday": "الجمعة",
 }
 
-# 🚨 قائمة الأسهم المصرية المعتمدة حصراً 🚨
 egyptian_stocks = [
     "AALR.CA", "ABUK.CA", "ACAMD.CA", "ACAP.CA", "ACGC.CA", "ACTF.CA", "ADCI.CA", "ADIB.CA",
     "ADPC.CA", "ADRI.CA", "AFDI.CA", "AFMC.CA", "AIDC.CA", "AIFI.CA", "AIH.CA", "AJWA.CA",
@@ -76,18 +72,6 @@ egyptian_stocks = [
 ]
 
 
-class SuppressStdOut:
-    """كلاس لإخفاء مخرجات وأخطاء النظام أثناء المزامنة"""
-    def __enter__(self):
-        self._original_stderr = sys.stderr
-        self.devnull = open(os.devnull, "w")
-        sys.stderr = self.devnull
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        sys.stderr = self._original_stderr
-        self.devnull.close()
-
-
 # --- إدارة الكاش وإشعارات التلجرام ---
 def get_last_sent_from_file():
     if os.path.exists(CACHE_FILE):
@@ -109,7 +93,7 @@ def save_last_sent_to_file(message):
 
 def send_telegram_notification(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️️ لم يتم العثور على بيانات TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID.")
+        print("⚠ لم يتم العثور على بيانات TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID.")
         return
 
     last_msg = get_last_sent_from_file()
@@ -141,7 +125,6 @@ def send_telegram_notification(message):
 # 1. سحب بيانات أحدث 7 جلسات تداول من TradingView
 # ---------------------------------------------------------
 def get_recent_trading_days(n=7):
-    """توليد تواريخ أحدث N أيام تداول للبورصة المصرية (باستثناء الجمعة والسبت)"""
     days = []
     curr = datetime.now().date()
     while len(days) < n:
@@ -152,7 +135,6 @@ def get_recent_trading_days(n=7):
 
 
 def get_tradingview_last_7_sessions():
-    """سحب أحدث 7 جلسات تداول من TradingView لجميع الأسهم"""
     url = "https://scanner.tradingview.com/egypt/scan"
 
     columns = ["name"]
@@ -164,16 +146,26 @@ def get_tradingview_last_7_sessions():
         "filter": [{"left": "name", "operation": "nempty"}],
         "options": {"active_symbols_only": True},
         "columns": columns,
-        "range": [0, 300],
+        "range": [0, 350],
     }
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Origin": "https://www.tradingview.com",
+        "Referer": "https://www.tradingview.com/",
+        "Content-Type": "application/json",
+    }
 
     recent_dates = get_recent_trading_days(7)
     tv_data_dict = {}
 
     try:
-        res = requests.post(url, json=payload, headers=headers, timeout=12)
+        res = requests.post(url, json=payload, headers=headers, timeout=15)
+        if res.status_code != 200:
+            print(f"⚠️ تحذير TradingView: كود الاستجابة {res.status_code}")
+            return tv_data_dict
+
         data = res.json().get("data", [])
+        print(f"📡 تم سحب بيانات {len(data)} سهم من TradingView بنجاح.")
 
         for item in data:
             sym = item["s"].replace("EGX:", "")
@@ -184,11 +176,7 @@ def get_tradingview_last_7_sessions():
             col_idx = 1
             for i in range(7):
                 if col_idx + 4 < len(d):
-                    o = d[col_idx]
-                    h = d[col_idx + 1]
-                    l = d[col_idx + 2]
-                    c = d[col_idx + 3]
-                    v = d[col_idx + 4]
+                    o, h, l, c, v = d[col_idx : col_idx + 5]
                     col_idx += 5
 
                     if None not in (o, h, l, c) and c > 0:
@@ -205,14 +193,66 @@ def get_tradingview_last_7_sessions():
                 df_tv = pd.DataFrame(bars).set_index("date").sort_index()
                 tv_data_dict[ticker_ca] = df_tv
 
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ خطأ أثناء الاتصال بـ TradingView: {e}")
 
     return tv_data_dict
 
 
 # ---------------------------------------------------------
-# 2. خوارزمية تحديد دعوم الصلب (Steel Supports)
+# 2. التحميل الجماعي من Yahoo Finance لتجنب الحظر
+# ---------------------------------------------------------
+def download_all_stocks_batched(tickers, start_str, end_str, batch_size=50):
+    all_data = {}
+    total_batches = (len(tickers) + batch_size - 1) // batch_size
+
+    for b_idx in range(0, len(tickers), batch_size):
+        batch = tickers[b_idx : b_idx + batch_size]
+        current_batch_num = (b_idx // batch_size) + 1
+        try:
+            raw = yf.download(
+                tickers=batch,
+                start=start_str,
+                end=end_str,
+                interval="1d",
+                group_by="ticker",
+                actions=True,
+                auto_adjust=True,
+                progress=False,
+                threads=True,
+            )
+
+            if raw is None or raw.empty:
+                print(f"⚠️ الدفعة {current_batch_num}/{total_batches} رجعت فارغة من Yahoo Finance.")
+                continue
+
+            for t in batch:
+                try:
+                    if isinstance(raw.columns, pd.MultiIndex):
+                        if t not in raw.columns.get_level_values(0):
+                            continue
+                        df_t = raw[t].copy()
+                    else:
+                        df_t = raw.copy()
+
+                    df_t = df_t.dropna(subset=["Close"])
+                    if not df_t.empty:
+                        all_data[t] = df_t
+                except Exception:
+                    continue
+
+        except Exception as e:
+            print(f"⚠️ خطأ في تحميل الدفعة {current_batch_num}: {e}")
+
+        if b_idx + batch_size < len(tickers):
+            time.sleep(2.5)  # تهدئة الطلبات لتفادي حظر IP
+
+    print(f"📥 تم تحميل البيانات التاريخية لـ {len(all_data)} سهم من أصل {len(tickers)} بنجاح.")
+    return all_data
+
+
+# ---------------------------------------------------------
+# 3. خوارزمية تحديد دعوم الصلب (Steel Supports)
 # ---------------------------------------------------------
 def find_steel_supports_optimized(df):
     lows = df["low"].values
@@ -261,33 +301,23 @@ def find_steel_supports_optimized(df):
 
 
 # ---------------------------------------------------------
-# 3. معالجة السهم وسد نقص البيانات مع TradingView
+# 4. تحليل السهم واستخراج الصفقات
 # ---------------------------------------------------------
-def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
+def analyze_stock_df(ticker, df_raw, tv_df_7days=None):
     trades = []
     try:
-        with SuppressStdOut():
-            ticker_obj = yf.Ticker(ticker)
-            splits = ticker_obj.splits
-            df = yf.download(
-                ticker,
-                start=start_dt,
-                end=end_dt,
-                interval="1d",
-                progress=False,
-                auto_adjust=True,
-            )
-
-        if df.empty or len(df) < 50:
-            return trades
-
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
+        df = df_raw.copy()
         df.columns = [str(c).lower() for c in df.columns]
         df.index = pd.to_datetime(df.index).date
 
-        # --- سد نقص بيانات yfinance باستخدام أحدث 7 جلسات من TradingView ---
+        # استخراج التجزئات (Stock Splits) من نفس الجدول المحمل بدون طلبات إضافية
+        splits_dates = []
+        if "stock splits" in df.columns:
+            splits_series = df[df["stock splits"] > 0]["stock splits"]
+            if not splits_series.empty:
+                splits_dates = list(splits_series.index)
+
+        # سد نقص بيانات yfinance باستخدام أحدث 7 جلسات من TradingView
         if tv_df_7days is not None and not tv_df_7days.empty:
             last_yf_date = df.index[-1]
             missing_sessions = tv_df_7days[tv_df_7days.index > last_yf_date]
@@ -296,28 +326,28 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
                 df = pd.concat([df, missing_sessions])
                 df = df[~df.index.duplicated(keep="last")].sort_index()
 
+        if len(df) < 50:
+            return trades
+
         # حساب شرائح التجزئة (Segments)
         df["segment"] = 0
-        if splits is not None and not splits.empty:
-            split_dates = pd.to_datetime(splits.index).date
+        if splits_dates:
             segment = 0
-            for d in split_dates:
+            for d in splits_dates:
                 segment += 1
                 df.loc[df.index >= d, "segment"] = segment
 
-        # حساب قيمة التداول اليومية (Turnover = Volume * Close)
+        # حساب قيمة التداول اليومية
         if "volume" in df.columns:
             df["trade_value"] = df["volume"] * df["close"]
             df["avg_10d_value"] = df["trade_value"].rolling(window=10).mean()
         else:
             df["avg_10d_value"] = 0
 
-        lows, highs, closes, opens = (
-            df["low"].values,
-            df["high"].values,
-            df["close"].values,
-            df["open"].values,
-        )
+        lows = df["low"].values
+        highs = df["high"].values
+        closes = df["close"].values
+        opens = df["open"].values
         avg_10d_vals = df["avg_10d_value"].values
         dates = df.index
 
@@ -332,7 +362,6 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
                 if i < cooldown_until_idx:
                     continue
 
-                # 🚨 شرط عدم دخول الصفقة إذا كان متوسط تداول أخر 10 أيام أقل من 500,000 جنيه 🚨
                 if avg_10d_vals[i] < MIN_10D_AVG_VOLUME_VALUE:
                     continue
 
@@ -411,98 +440,59 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
                         "Days Held": (dates[i] - entry_d).days,
                     })
 
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ خطأ أثناء تحليل {ticker}: {e}")
     return trades
 
 
 # ---------------------------------------------------------
-# 4. دورة مسح واحدة واستخراج الفرص النشطة
+# 5. التشغيل الرئيسي والإرسال عبر التلجرام
 # ---------------------------------------------------------
-def single_pass_backtest():
-    end_date = datetime.now()
+def run_scanner():
+    print(
+        f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 بدء الفحص الهجين المركب (مع تصفية الأسهم حسب السيولة > 500,000 ج.م)..."
+    )
+
+    end_date = datetime.now() + timedelta(days=1)
     start_date = end_date - timedelta(days=10 * 365)
 
     start_str = start_date.strftime("%Y-%m-%d")
     end_str = end_date.strftime("%Y-%m-%d")
 
     tv_7days_data = get_tradingview_last_7_sessions()
+    yf_all_data = download_all_stocks_batched(egyptian_stocks, start_str, end_str, batch_size=50)
+
+    if not yf_all_data:
+        print("❌ فشل سحب البيانات من Yahoo Finance بالكامل (قد يكون هناك حظر مؤقت على IP السيرفر).")
+        return
 
     open_trades = []
     latest_dates = []
 
-    with ProcessPoolExecutor() as executor:
-        futures = {
-            executor.submit(
-                process_stock, ticker, start_str, end_str, tv_7days_data.get(ticker)
-            ): ticker
-            for ticker in egyptian_stocks
-        }
-        for future in as_completed(futures):
-            res = future.result()
-            if res:
-                for trade in res:
-                    if trade.get("Status") == "Open ⏳":
-                        open_trades.append(trade)
-                        if trade.get("Exit Date"):
-                            latest_dates.append(trade.get("Exit Date"))
+    for ticker in egyptian_stocks:
+        if ticker not in yf_all_data:
+            continue
+        res = analyze_stock_df(ticker, yf_all_data[ticker], tv_7days_data.get(ticker))
+        for trade in res:
+            if trade.get("Status") == "Open ⏳":
+                open_trades.append(trade)
+                if trade.get("Exit Date"):
+                    latest_dates.append(trade.get("Exit Date"))
 
-    data_date_str = ""
+    detected_data_date = ""
     if latest_dates:
         most_common_date = Counter(latest_dates).most_common(1)[0][0]
         if isinstance(most_common_date, str):
             most_common_date = datetime.strptime(most_common_date, "%Y-%m-%d").date()
         day_english = most_common_date.strftime("%A")
         day_arabic = DAYS_ARABIC.get(day_english, day_english)
-        data_date_str = f"{day_arabic} {most_common_date.strftime('%d/%m/%Y')}"
-
-    return open_trades, data_date_str
-
-
-# ---------------------------------------------------------
-# 5. الفحص الهجين المركب مع الإرسال عبر التلجرام
-# ---------------------------------------------------------
-def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=10):
-    print(
-        f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 بدء الفحص الهجين المركب (مع تصفية الأسهم حسب السيولة > 500,000 ج.م)..."
-    )
-
-    ticker_counts = Counter()
-    latest_trade_info = {}
-    detected_data_date = ""
-
-    for check_num in range(1, total_checks + 1):
-        print(f"🔄 [دورة {check_num}/{total_checks}] جاري سحب البيانات المدمجة واستخراج الفرص...")
-        open_trades, data_date_str = single_pass_backtest()
-
-        if data_date_str:
-            detected_data_date = data_date_str
-
-        found_tickers = []
-        for trade in open_trades:
-            t = trade["Ticker"]
-            found_tickers.append(t)
-            latest_trade_info[t] = trade
-
-        ticker_counts.update(found_tickers)
-        print(
-            f"   ✓ تم العثور على {len(found_tickers)} صفقة مفتوحة مستوفية لشروط السيولة فالدورة."
-        )
-
-        if check_num < total_checks and delay_between_checks > 0:
-            time.sleep(delay_between_checks)
-
-    confirmed_trades = []
-    for ticker, count in ticker_counts.items():
-        if count >= min_occurrences:
-            trade_data = latest_trade_info[ticker]
-            confirmed_trades.append(trade_data)
+        detected_data_date = f"{day_arabic} {most_common_date.strftime('%d/%m/%Y')}"
 
     header_date = f" (جلسة {detected_data_date})" if detected_data_date else ""
 
-    if confirmed_trades:
+    if open_trades:
         msg = f"🚀 نتائج فحص البورصة المصرية المدمج{header_date}:\n\n"
-        for row in confirmed_trades:
+        for row in open_trades:
             entry_close = row.get("Entry Day Close", 0)
             entry_p = row.get("Entry Price", 0)
             curr_p = row.get("Exit Price", 0)
@@ -529,4 +519,4 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
 
 
 if __name__ == "__main__":
-    run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=10)
+    run_scanner()
