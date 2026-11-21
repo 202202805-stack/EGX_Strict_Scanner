@@ -3,6 +3,7 @@ import sys
 import time
 import warnings
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -108,7 +109,7 @@ def save_last_sent_to_file(message):
 
 def send_telegram_notification(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠ لم يتم العثور على بيانات TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID.")
+        print("⚠️️ لم يتم العثور على بيانات TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID.")
         return
 
     last_msg = get_last_sent_from_file()
@@ -163,26 +164,16 @@ def get_tradingview_last_7_sessions():
         "filter": [{"left": "name", "operation": "nempty"}],
         "options": {"active_symbols_only": True},
         "columns": columns,
-        "range": [0, 350],
+        "range": [0, 300],
     }
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Origin": "https://www.tradingview.com",
-        "Referer": "https://www.tradingview.com/",
-        "Content-Type": "application/json",
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
 
     recent_dates = get_recent_trading_days(7)
     tv_data_dict = {}
 
     try:
-        res = requests.post(url, json=payload, headers=headers, timeout=15)
-        if res.status_code != 200:
-            print(f"⚠️ تحذير TradingView: كود الاستجابة {res.status_code}")
-            return tv_data_dict
-
+        res = requests.post(url, json=payload, headers=headers, timeout=12)
         data = res.json().get("data", [])
-        print(f"   📡 تم سحب بيانات {len(data)} سهم من TradingView.")
 
         for item in data:
             sym = item["s"].replace("EGX:", "")
@@ -214,8 +205,8 @@ def get_tradingview_last_7_sessions():
                 df_tv = pd.DataFrame(bars).set_index("date").sort_index()
                 tv_data_dict[ticker_ca] = df_tv
 
-    except Exception as e:
-        print(f"⚠️ خطأ أثناء الاتصال بـ TradingView: {e}")
+    except Exception:
+        pass
 
     return tv_data_dict
 
@@ -274,37 +265,27 @@ def find_steel_supports_optimized(df):
 # ---------------------------------------------------------
 def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
     trades = []
-    has_data = False
     try:
         with SuppressStdOut():
-            # جلب السعر والتجزئات في طلب واحد لتقليل الضغط وتفادي الحظر
+            ticker_obj = yf.Ticker(ticker)
+            splits = ticker_obj.splits
             df = yf.download(
                 ticker,
                 start=start_dt,
                 end=end_dt,
                 interval="1d",
-                actions=True,
                 progress=False,
                 auto_adjust=True,
             )
 
-        if df is None or df.empty or len(df) < 50:
-            return trades, has_data
-
-        has_data = True
+        if df.empty or len(df) < 50:
+            return trades
 
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
         df.columns = [str(c).lower() for c in df.columns]
         df.index = pd.to_datetime(df.index).date
-
-        # استخراج تواريخ التجزئة من العمود المدمج مباشرة
-        split_dates = []
-        if "stock splits" in df.columns:
-            splits_series = df[df["stock splits"] > 0]["stock splits"]
-            if not splits_series.empty:
-                split_dates = list(splits_series.index)
 
         # --- سد نقص بيانات yfinance باستخدام أحدث 7 جلسات من TradingView ---
         if tv_df_7days is not None and not tv_df_7days.empty:
@@ -317,7 +298,8 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
 
         # حساب شرائح التجزئة (Segments)
         df["segment"] = 0
-        if split_dates:
+        if splits is not None and not splits.empty:
+            split_dates = pd.to_datetime(splits.index).date
             segment = 0
             for d in split_dates:
                 segment += 1
@@ -431,14 +413,14 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
 
     except Exception:
         pass
-    return trades, has_data
+    return trades
 
 
 # ---------------------------------------------------------
-# 4. دورة مسح واحدة تسلسلية (سهم سهم بالترتيب)
+# 4. دورة مسح واحدة واستخراج الفرص النشطة
 # ---------------------------------------------------------
 def single_pass_backtest():
-    end_date = datetime.now() + timedelta(days=1)
+    end_date = datetime.now()
     start_date = end_date - timedelta(days=10 * 365)
 
     start_str = start_date.strftime("%Y-%m-%d")
@@ -448,23 +430,22 @@ def single_pass_backtest():
 
     open_trades = []
     latest_dates = []
-    loaded_stocks_count = 0
 
-    # فحص تسلسلي سهم سهم بالترتيب دون تداخل طلبات
-    for idx, ticker in enumerate(egyptian_stocks, 1):
-        res, has_data = process_stock(ticker, start_str, end_str, tv_7days_data.get(ticker))
-        if has_data:
-            loaded_stocks_count += 1
-            for trade in res:
-                if trade.get("Status") == "Open ⏳":
-                    open_trades.append(trade)
-                    if trade.get("Exit Date"):
-                        latest_dates.append(trade.get("Exit Date"))
-
-        # فاصل زمني قصير جداً بين الأسهم لحماية السيرفر من الحظر
-        time.sleep(0.15)
-
-    print(f"   📥 تم تحميل وفحص {loaded_stocks_count} سهم من أصل {len(egyptian_stocks)} بنجاح.")
+    with ProcessPoolExecutor() as executor:
+        futures = {
+            executor.submit(
+                process_stock, ticker, start_str, end_str, tv_7days_data.get(ticker)
+            ): ticker
+            for ticker in egyptian_stocks
+        }
+        for future in as_completed(futures):
+            res = future.result()
+            if res:
+                for trade in res:
+                    if trade.get("Status") == "Open ⏳":
+                        open_trades.append(trade)
+                        if trade.get("Exit Date"):
+                            latest_dates.append(trade.get("Exit Date"))
 
     data_date_str = ""
     if latest_dates:
@@ -479,11 +460,11 @@ def single_pass_backtest():
 
 
 # ---------------------------------------------------------
-# 5. الفحص الهجين المركب (مرتين) مع الإرسال عبر التلجرام
+# 5. الفحص الهجين المركب مع الإرسال عبر التلجرام
 # ---------------------------------------------------------
-def run_majority_check(total_checks=2, min_occurrences=2, delay_between_checks=10):
+def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=10):
     print(
-        f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 بدء الفحص الهجين المركب (مرتين - سهم سهم بالترتيب)..."
+        f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 بدء الفحص الهجين المركب (مع تصفية الأسهم حسب السيولة > 500,000 ج.م)..."
     )
 
     ticker_counts = Counter()
@@ -548,4 +529,4 @@ def run_majority_check(total_checks=2, min_occurrences=2, delay_between_checks=1
 
 
 if __name__ == "__main__":
-    run_majority_check(total_checks=2, min_occurrences=2, delay_between_checks=10)
+    run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=10)
