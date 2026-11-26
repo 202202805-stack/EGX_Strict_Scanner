@@ -33,6 +33,8 @@ MIN_10D_AVG_VOLUME_VALUE = 500000  # 🚨 الحد الأدنى لمتوسط ق�
 BATCH_SIZE = 20  # عدد الأسهم في كل دفعة متوازية
 DELAY_BETWEEN_BATCHES = 2.0  # فترة راحة بالثواني بين كل دفعة لتجنب حظر Yahoo Finance
 
+FIRST_ERROR_PRINTED = False
+
 # قاموس ترجمة أسماء الأيام للعربية
 DAYS_ARABIC = {
     "Saturday": "السبت",
@@ -78,18 +80,6 @@ egyptian_stocks = [
     "UPMS.CA", "UTOP.CA", "VALU.CA", "VERT.CA", "VLMR.CA", "VLMRA.CA", "WCDF.CA", "WKOL.CA",
     "ZEOT.CA", "ZMID.CA",
 ]
-
-
-class SuppressStdOut:
-    """كلاس لإخفاء مخرجات وأخطاء النظام أثناء المزامنة"""
-    def __enter__(self):
-        self._original_stderr = sys.stderr
-        self.devnull = open(os.devnull, "w")
-        sys.stderr = self.devnull
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        sys.stderr = self._original_stderr
-        self.devnull.close()
 
 
 # --- إدارة الكاش وإشعارات التلجرام ---
@@ -145,18 +135,16 @@ def send_telegram_notification(message):
 # 1. سحب بيانات أحدث 7 جلسات تداول من TradingView
 # ---------------------------------------------------------
 def get_recent_trading_days(n=7):
-    """توليد تواريخ أحدث N أيام تداول للبورصة المصرية (باستثناء الجمعة والسبت)"""
     days = []
     curr = datetime.now().date()
     while len(days) < n:
-        if curr.weekday() not in [4, 5]:  # 4 = الجمعة, 5 = السبت
+        if curr.weekday() not in [4, 5]:
             days.append(curr)
         curr -= timedelta(days=1)
     return days
 
 
 def get_tradingview_last_7_sessions():
-    """سحب أحدث 7 جلسات تداول من TradingView لجميع الأسهم"""
     url = "https://scanner.tradingview.com/egypt/scan"
 
     columns = ["name"]
@@ -268,22 +256,30 @@ def find_steel_supports_optimized(df):
 # 3. معالجة السهم وسد نقص البيانات مع TradingView
 # ---------------------------------------------------------
 def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
+    global FIRST_ERROR_PRINTED
     trades = []
     try:
-        with SuppressStdOut():
-            ticker_obj = yf.Ticker(ticker)
-            splits = ticker_obj.splits
-            df = yf.download(
-                ticker,
-                start=start_dt,
-                end=end_dt,
-                interval="1d",
-                progress=False,
-                auto_adjust=True,
-            )
+        df = yf.download(
+            ticker,
+            start=start_dt,
+            end=end_dt,
+            interval="1d",
+            progress=False,
+            auto_adjust=True,
+        )
 
         if df is None or df.empty or len(df) < 50:
+            if not FIRST_ERROR_PRINTED:
+                print(f"\n⚠️ [تشخيص] السهم {ticker} رجع بيانات فاضية أو ناقصة من Yahoo (العدد: {0 if df is None else len(df)})")
+                FIRST_ERROR_PRINTED = True
             return None
+
+        # جلب بيانات التجزئة بشكل آمن حتى لا تعطل السهم إذا فشلت
+        splits = None
+        try:
+            splits = yf.Ticker(ticker).splits
+        except Exception:
+            splits = None
 
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
@@ -309,7 +305,7 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
                 segment += 1
                 df.loc[df.index >= d, "segment"] = segment
 
-        # حساب قيمة التداول اليومية (Turnover = Volume * Close)
+        # حساب قيمة التداول اليومية
         if "volume" in df.columns:
             df["trade_value"] = df["volume"] * df["close"]
             df["avg_10d_value"] = df["trade_value"].rolling(window=10).mean()
@@ -336,7 +332,6 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
                 if i < cooldown_until_idx:
                     continue
 
-                # 🚨 شرط عدم دخول الصفقة إذا كان متوسط تداول أخر 10 أيام أقل من 500,000 جنيه 🚨
                 if avg_10d_vals[i] < MIN_10D_AVG_VOLUME_VALUE:
                     continue
 
@@ -417,7 +412,10 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
 
         return trades
 
-    except Exception:
+    except Exception as e:
+        if not FIRST_ERROR_PRINTED:
+            print(f"\n❌ [تشخيص] سبب توقف سحب البيانات ({ticker}): {type(e).__name__} - {e}")
+            FIRST_ERROR_PRINTED = True
         return None
 
 
@@ -425,7 +423,6 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
 # 4. دورة مسح واحدة بنظام الدفعات (20 سهم في كل دفعة)
 # ---------------------------------------------------------
 def chunk_list(lst, chunk_size):
-    """تقسيم القائمة إلى دفعات بحجم محدد"""
     for i in range(0, len(lst), chunk_size):
         yield lst[i : i + chunk_size]
 
@@ -450,9 +447,8 @@ def single_pass_backtest(batch_size=BATCH_SIZE, delay_between_batches=DELAY_BETW
     failed_stocks = 0
 
     for batch_idx, batch in enumerate(batches, start=1):
-        print(f"   ⏳ فحص الدفعة {batch_idx}/{total_batches} ({len(batch)} سهم)...", end="\r")
+        print(f"   ⏳ فحص الدفعة {batch_idx}/{total_batches} ({len(batch)} سهم)...")
 
-        # تشغيل 20 Thread بالتوازي للدفعة الحالية فقط
         with ThreadPoolExecutor(max_workers=batch_size) as executor:
             futures = {
                 executor.submit(
@@ -461,7 +457,6 @@ def single_pass_backtest(batch_size=BATCH_SIZE, delay_between_batches=DELAY_BETW
                 for ticker in batch
             }
 
-            # انتظار انتهاء الدفعة الحالية بالكامل قبل الانتقال للدفعة التالية
             for future in as_completed(futures):
                 try:
                     res = future.result()
@@ -477,11 +472,10 @@ def single_pass_backtest(batch_size=BATCH_SIZE, delay_between_batches=DELAY_BETW
                 except Exception:
                     failed_stocks += 1
 
-        # استراحة قصيرة بين كل دفعة لتجنب حظر Yahoo Finance
         if batch_idx < total_batches and delay_between_batches > 0:
             time.sleep(delay_between_batches)
 
-    print(f"\n   📊 ملخص الدورة: نجح فحص {successful_stocks} سهم | تعذر/بيانات ناقصة: {failed_stocks} سهم.")
+    print(f"   📊 ملخص الدورة: نجح فحص {successful_stocks} سهم | تعذر/بيانات ناقصة: {failed_stocks} سهم.")
 
     data_date_str = ""
     if latest_dates:
