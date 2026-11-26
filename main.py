@@ -3,7 +3,7 @@ import sys
 import time
 import warnings
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -28,6 +28,10 @@ TARGET_PROFIT = 0.05
 STOP_LOSS = 0.04
 MAX_ENTRY_SLIPPAGE = 0.013
 MIN_10D_AVG_VOLUME_VALUE = 500000  # 🚨 الحد الأدنى لمتوسط قيمة التداول اليومية (نصف مليون)
+
+# --- إعدادات الفحص المتوازي بالدفعات ---
+BATCH_SIZE = 20  # عدد الأسهم في كل دفعة متوازية
+DELAY_BETWEEN_BATCHES = 2.0  # فترة راحة بالثواني بين كل دفعة لتجنب حظر Yahoo Finance
 
 # قاموس ترجمة أسماء الأيام للعربية
 DAYS_ARABIC = {
@@ -109,7 +113,7 @@ def save_last_sent_to_file(message):
 
 def send_telegram_notification(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️️ لم يتم العثور على بيانات TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID.")
+        print("⚠ لم يتم العثور على بيانات TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID.")
         return
 
     last_msg = get_last_sent_from_file()
@@ -205,8 +209,8 @@ def get_tradingview_last_7_sessions():
                 df_tv = pd.DataFrame(bars).set_index("date").sort_index()
                 tv_data_dict[ticker_ca] = df_tv
 
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ تعذر سحب بيانات TradingView: {e}")
 
     return tv_data_dict
 
@@ -278,8 +282,8 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
                 auto_adjust=True,
             )
 
-        if df.empty or len(df) < 50:
-            return trades
+        if df is None or df.empty or len(df) < 50:
+            return None
 
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
@@ -411,15 +415,22 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
                         "Days Held": (dates[i] - entry_d).days,
                     })
 
+        return trades
+
     except Exception:
-        pass
-    return trades
+        return None
 
 
 # ---------------------------------------------------------
-# 4. دورة مسح واحدة واستخراج الفرص النشطة
+# 4. دورة مسح واحدة بنظام الدفعات (20 سهم في كل دفعة)
 # ---------------------------------------------------------
-def single_pass_backtest():
+def chunk_list(lst, chunk_size):
+    """تقسيم القائمة إلى دفعات بحجم محدد"""
+    for i in range(0, len(lst), chunk_size):
+        yield lst[i : i + chunk_size]
+
+
+def single_pass_backtest(batch_size=BATCH_SIZE, delay_between_batches=DELAY_BETWEEN_BATCHES):
     end_date = datetime.now()
     start_date = end_date - timedelta(days=10 * 365)
 
@@ -427,25 +438,50 @@ def single_pass_backtest():
     end_str = end_date.strftime("%Y-%m-%d")
 
     tv_7days_data = get_tradingview_last_7_sessions()
+    print(f"   📡 تم سحب بيانات TradingView لـ {len(tv_7days_data)} سهم.")
 
     open_trades = []
     latest_dates = []
 
-    with ProcessPoolExecutor() as executor:
-        futures = {
-            executor.submit(
-                process_stock, ticker, start_str, end_str, tv_7days_data.get(ticker)
-            ): ticker
-            for ticker in egyptian_stocks
-        }
-        for future in as_completed(futures):
-            res = future.result()
-            if res:
-                for trade in res:
-                    if trade.get("Status") == "Open ⏳":
-                        open_trades.append(trade)
-                        if trade.get("Exit Date"):
-                            latest_dates.append(trade.get("Exit Date"))
+    batches = list(chunk_list(egyptian_stocks, batch_size))
+    total_batches = len(batches)
+
+    successful_stocks = 0
+    failed_stocks = 0
+
+    for batch_idx, batch in enumerate(batches, start=1):
+        print(f"   ⏳ فحص الدفعة {batch_idx}/{total_batches} ({len(batch)} سهم)...", end="\r")
+
+        # تشغيل 20 Thread بالتوازي للدفعة الحالية فقط
+        with ThreadPoolExecutor(max_workers=batch_size) as executor:
+            futures = {
+                executor.submit(
+                    process_stock, ticker, start_str, end_str, tv_7days_data.get(ticker)
+                ): ticker
+                for ticker in batch
+            }
+
+            # انتظار انتهاء الدفعة الحالية بالكامل قبل الانتقال للدفعة التالية
+            for future in as_completed(futures):
+                try:
+                    res = future.result()
+                    if res is not None:
+                        successful_stocks += 1
+                        for trade in res:
+                            if trade.get("Status") == "Open ⏳":
+                                open_trades.append(trade)
+                                if trade.get("Exit Date"):
+                                    latest_dates.append(trade.get("Exit Date"))
+                    else:
+                        failed_stocks += 1
+                except Exception:
+                    failed_stocks += 1
+
+        # استراحة قصيرة بين كل دفعة لتجنب حظر Yahoo Finance
+        if batch_idx < total_batches and delay_between_batches > 0:
+            time.sleep(delay_between_batches)
+
+    print(f"\n   📊 ملخص الدورة: نجح فحص {successful_stocks} سهم | تعذر/بيانات ناقصة: {failed_stocks} سهم.")
 
     data_date_str = ""
     if latest_dates:
@@ -472,8 +508,11 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
     detected_data_date = ""
 
     for check_num in range(1, total_checks + 1):
-        print(f"🔄 [دورة {check_num}/{total_checks}] جاري سحب البيانات المدمجة واستخراج الفرص...")
-        open_trades, data_date_str = single_pass_backtest()
+        print(f"\n🔄 [دورة {check_num}/{total_checks}] جاري سحب البيانات المدمجة واستخراج الفرص...")
+        open_trades, data_date_str = single_pass_backtest(
+            batch_size=BATCH_SIZE,
+            delay_between_batches=DELAY_BETWEEN_BATCHES,
+        )
 
         if data_date_str:
             detected_data_date = data_date_str
@@ -486,7 +525,7 @@ def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=1
 
         ticker_counts.update(found_tickers)
         print(
-            f"   ✓ تم العثور على {len(found_tickers)} صفقة مفتوحة مستوفية لشروط السيولة فالدورة."
+            f"   ✓ تم العثور على {len(found_tickers)} صفقة مفتوحة مستوفية لشروط السيولة في الدورة."
         )
 
         if check_num < total_checks and delay_between_checks > 0:
