@@ -31,9 +31,7 @@ MIN_10D_AVG_VOLUME_VALUE = 500000  # 🚨 الحد الأدنى لمتوسط ق�
 
 # --- إعدادات الفحص المتوازي بالدفعات ---
 BATCH_SIZE = 20  # عدد الأسهم في كل دفعة متوازية
-DELAY_BETWEEN_BATCHES = 2.0  # فترة راحة بالثواني بين كل دفعة لتجنب حظر Yahoo Finance
-
-FIRST_ERROR_PRINTED = False
+DELAY_BETWEEN_BATCHES = 1.5  # فترة راحة بالثواني بين كل دفعة
 
 # قاموس ترجمة أسماء الأيام للعربية
 DAYS_ARABIC = {
@@ -204,7 +202,85 @@ def get_tradingview_last_7_sessions():
 
 
 # ---------------------------------------------------------
-# 2. خوارزمية تحديد دعوم الصلب (Steel Supports)
+# 2. سحب البيانات التاريخية من Yahoo مباشرة بدون خطأ التوقيت الصيفي
+# ---------------------------------------------------------
+def fetch_yahoo_direct(ticker, years=10):
+    """سحب البيانات التاريخية والانقسامات مباشرة من Yahoo Chart API لتفادي NonExistentTimeError"""
+    end_ts = int(datetime.now().timestamp())
+    start_ts = int((datetime.now() - timedelta(days=years * 365)).timestamp())
+
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        f"?period1={start_ts}&period2={end_ts}&interval=1d&events=div,splits"
+    )
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+
+    res = requests.get(url, headers=headers, timeout=15)
+    if res.status_code != 200:
+        return None, []
+
+    data = res.json()
+    result = data.get("chart", {}).get("result")
+    if not result:
+        return None, []
+
+    res_obj = result[0]
+    timestamps = res_obj.get("timestamp", [])
+    quotes = res_obj.get("indicators", {}).get("quote", [{}])[0]
+    adjclose = res_obj.get("indicators", {}).get("adjclose", [{}])[0].get("adjclose", [])
+
+    if not timestamps or not quotes:
+        return None, []
+
+    opens = quotes.get("open", [])
+    highs = quotes.get("high", [])
+    lows = quotes.get("low", [])
+    closes = quotes.get("close", [])
+    volumes = quotes.get("volume", [])
+
+    rows = []
+    for i, ts in enumerate(timestamps):
+        if i >= len(closes) or closes[i] is None or opens[i] is None or highs[i] is None or lows[i] is None:
+            continue
+
+        # حساب معامل التعديل (Auto Adjust) إذا توفر adjclose
+        raw_close = float(closes[i])
+        adj_c = float(adjclose[i]) if (adjclose and i < len(adjclose) and adjclose[i] is not None) else raw_close
+        factor = (adj_c / raw_close) if raw_close > 0 else 1.0
+
+        # تحويل الـ Timestamp لتاريخ UTC مباشر (يتجنب خطأ التوقيت الصيفي لمصر تماماً)
+        dt = datetime.utcfromtimestamp(ts).date()
+
+        rows.append({
+            "date": dt,
+            "open": float(opens[i]) * factor,
+            "high": float(highs[i]) * factor,
+            "low": float(lows[i]) * factor,
+            "close": adj_c,
+            "volume": float(volumes[i]) if (i < len(volumes) and volumes[i] is not None) else 0.0,
+        })
+
+    if not rows:
+        return None, []
+
+    df = pd.DataFrame(rows).set_index("date")
+    df = df[~df.index.duplicated(keep="last")].sort_index()
+
+    # استخراج تواريخ التجزئة (Splits) من نفس الاستجابة
+    split_dates = []
+    splits_dict = res_obj.get("events", {}).get("splits", {})
+    if splits_dict:
+        for s_ts in splits_dict.keys():
+            split_dates.append(datetime.utcfromtimestamp(int(s_ts)).date())
+        split_dates.sort()
+
+    return df, split_dates
+
+
+# ---------------------------------------------------------
+# 3. خوارزمية تحديد دعوم الصلب (Steel Supports)
 # ---------------------------------------------------------
 def find_steel_supports_optimized(df):
     lows = df["low"].values
@@ -253,41 +329,17 @@ def find_steel_supports_optimized(df):
 
 
 # ---------------------------------------------------------
-# 3. معالجة السهم وسد نقص البيانات مع TradingView
+# 4. معالجة السهم وسد نقص البيانات مع TradingView
 # ---------------------------------------------------------
-def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
-    global FIRST_ERROR_PRINTED
+def process_stock(ticker, tv_df_7days=None):
     trades = []
     try:
-        df = yf.download(
-            ticker,
-            start=start_dt,
-            end=end_dt,
-            interval="1d",
-            progress=False,
-            auto_adjust=True,
-        )
+        df, split_dates = fetch_yahoo_direct(ticker, years=10)
 
         if df is None or df.empty or len(df) < 50:
-            if not FIRST_ERROR_PRINTED:
-                print(f"\n⚠️ [تشخيص] السهم {ticker} رجع بيانات فاضية أو ناقصة من Yahoo (العدد: {0 if df is None else len(df)})")
-                FIRST_ERROR_PRINTED = True
             return None
 
-        # جلب بيانات التجزئة بشكل آمن حتى لا تعطل السهم إذا فشلت
-        splits = None
-        try:
-            splits = yf.Ticker(ticker).splits
-        except Exception:
-            splits = None
-
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        df.columns = [str(c).lower() for c in df.columns]
-        df.index = pd.to_datetime(df.index).date
-
-        # --- سد نقص بيانات yfinance باستخدام أحدث 7 جلسات من TradingView ---
+        # --- سد نقص بيانات Yahoo باستخدام أحدث 7 جلسات من TradingView ---
         if tv_df_7days is not None and not tv_df_7days.empty:
             last_yf_date = df.index[-1]
             missing_sessions = tv_df_7days[tv_df_7days.index > last_yf_date]
@@ -298,8 +350,7 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
 
         # حساب شرائح التجزئة (Segments)
         df["segment"] = 0
-        if splits is not None and not splits.empty:
-            split_dates = pd.to_datetime(splits.index).date
+        if split_dates:
             segment = 0
             for d in split_dates:
                 segment += 1
@@ -412,15 +463,12 @@ def process_stock(ticker, start_dt, end_dt, tv_df_7days=None):
 
         return trades
 
-    except Exception as e:
-        if not FIRST_ERROR_PRINTED:
-            print(f"\n❌ [تشخيص] سبب توقف سحب البيانات ({ticker}): {type(e).__name__} - {e}")
-            FIRST_ERROR_PRINTED = True
+    except Exception:
         return None
 
 
 # ---------------------------------------------------------
-# 4. دورة مسح واحدة بنظام الدفعات (20 سهم في كل دفعة)
+# 5. دورة مسح واحدة بنظام الدفعات (20 سهم في كل دفعة)
 # ---------------------------------------------------------
 def chunk_list(lst, chunk_size):
     for i in range(0, len(lst), chunk_size):
@@ -428,12 +476,6 @@ def chunk_list(lst, chunk_size):
 
 
 def single_pass_backtest(batch_size=BATCH_SIZE, delay_between_batches=DELAY_BETWEEN_BATCHES):
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=10 * 365)
-
-    start_str = start_date.strftime("%Y-%m-%d")
-    end_str = end_date.strftime("%Y-%m-%d")
-
     tv_7days_data = get_tradingview_last_7_sessions()
     print(f"   📡 تم سحب بيانات TradingView لـ {len(tv_7days_data)} سهم.")
 
@@ -452,7 +494,7 @@ def single_pass_backtest(batch_size=BATCH_SIZE, delay_between_batches=DELAY_BETW
         with ThreadPoolExecutor(max_workers=batch_size) as executor:
             futures = {
                 executor.submit(
-                    process_stock, ticker, start_str, end_str, tv_7days_data.get(ticker)
+                    process_stock, ticker, tv_7days_data.get(ticker)
                 ): ticker
                 for ticker in batch
             }
@@ -475,7 +517,7 @@ def single_pass_backtest(batch_size=BATCH_SIZE, delay_between_batches=DELAY_BETW
         if batch_idx < total_batches and delay_between_batches > 0:
             time.sleep(delay_between_batches)
 
-    print(f"   📊 ملخص الدورة: نجح فحص {successful_stocks} سهم | تعذر/بيانات ناقصة: {failed_stocks} سهم.")
+    print(f"   📊 ملخص الدورة: نجح فحص {successful_stocks} سهم | أسهم مشطوبة/غير متاحة: {failed_stocks} سهم.")
 
     data_date_str = ""
     if latest_dates:
@@ -490,7 +532,7 @@ def single_pass_backtest(batch_size=BATCH_SIZE, delay_between_batches=DELAY_BETW
 
 
 # ---------------------------------------------------------
-# 5. الفحص الهجين المركب مع الإرسال عبر التلجرام
+# 6. الفحص الهجين المركب مع الإرسال عبر التلجرام
 # ---------------------------------------------------------
 def run_majority_check(total_checks=3, min_occurrences=2, delay_between_checks=10):
     print(
